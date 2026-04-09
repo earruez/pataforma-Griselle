@@ -1,0 +1,503 @@
+// ═════════════════════════════════════════════════════════════════════════════
+//  Griselle — Aeronautical Maintenance SaaS
+//  Prisma Schema  ·  Professional Data Model
+// ═════════════════════════════════════════════════════════════════════════════
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ENUMS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Subscription tiers for the SaaS model
+enum SubscriptionPlan {
+  FREE
+  PROFESSIONAL
+  ENTERPRISE
+
+  @@map("subscription_plan")
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  TRIALING
+  PAST_DUE
+  CANCELLED
+  SUSPENDED
+
+  @@map("subscription_status")
+}
+
+/// Aeronautical operational status — AOG is a critical blocking state
+enum AircraftStatus {
+  OPERATIONAL       // Available for flight
+  AOG               // Aircraft On Ground — grounded due to defect
+  IN_MAINTENANCE    // Planned maintenance check in progress
+  GROUNDED          // Administratively grounded (e.g., expired cert)
+  DECOMMISSIONED    // Permanently withdrawn from service
+
+  @@map("aircraft_status")
+}
+
+enum ComponentStatus {
+  INSTALLED         // Currently fitted to an aircraft
+  SERVICEABLE       // In store, ready for installation
+  UNSERVICEABLE     // Removed and awaiting shop action
+  IN_SHOP           // Under repair/overhaul at a MRO
+  SCRAPPED          // Beyond economic repair, disposed
+
+  @@map("component_status")
+}
+
+/// Interval type driving a maintenance task's recurrence
+enum TaskIntervalType {
+  FLIGHT_HOURS      // e.g. every 100 flight hours
+  CYCLES            // e.g. every 500 landings
+  CALENDAR_DAYS     // e.g. every 365 days
+  FLIGHT_HOURS_OR_CALENDAR // whichever comes first
+  CYCLES_OR_CALENDAR
+  ON_CONDITION      // Condition-monitored, no fixed interval
+
+  @@map("task_interval_type")
+}
+
+/// Regulatory/technical reference classification
+enum ReferenceType {
+  AMM               // Aircraft Maintenance Manual
+  AD                // Airworthiness Directive (mandatory)
+  SB                // Service Bulletin (manufacturer)
+  CMR               // Certification Maintenance Requirement
+  CDCCL             // Critical Design Configuration Control Limitation
+  MPD               // Maintenance Planning Document
+  ETOPS             // Extended Operations requirement
+  INTERNAL          // Operator-defined task
+
+  @@map("reference_type")
+}
+
+enum ComplianceStatus {
+  COMPLETED
+  DEFERRED          // Officially deferred with MEL/NEF reference
+  OVERDUE           // Past due date/hours — requires immediate attention
+  CANCELLED
+
+  @@map("compliance_status")
+}
+
+enum UserRole {
+  ADMIN             // Full access, user management
+  SUPERVISOR        // Approve work orders, sign-off compliances
+  TECHNICIAN        // Perform and record maintenance work
+  INSPECTOR         // Independent inspection sign-off (RII)
+  READONLY          // View-only (auditors, clients)
+
+  @@map("user_role")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ORGANIZATION  (Multi-tenant root)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Organization {
+  id                 String             @id @default(uuid()) @db.Uuid
+  name               String             @db.VarChar(255)
+  slug               String             @unique @db.VarChar(100)
+  legalName          String?            @db.VarChar(255)
+  country            String             @db.Char(2)          // ISO 3166-1 alpha-2
+  subscriptionPlan   SubscriptionPlan   @default(FREE)
+  subscriptionStatus SubscriptionStatus @default(TRIALING)
+  subscriptionExpiresAt DateTime?
+  isActive           Boolean            @default(true)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  // Relations
+  users              User[]
+  aircraft           Aircraft[]
+  components         Component[]
+  maintenanceTasks   MaintenanceTask[]
+  compliances        Compliance[]
+
+  @@map("organizations")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  USERS  (Tenant-scoped, with aeronautical roles)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @db.Uuid
+  email          String   @db.VarChar(255)
+  name           String   @db.VarChar(255)
+  passwordHash   String
+  role           UserRole @default(TECHNICIAN)
+
+  /// Aircraft Maintenance Engineer licence number (EASA Part-66, FAA A&P, etc.)
+  licenseNumber  String?  @db.VarChar(50)
+  licenseExpiry  DateTime?
+
+  /// Authorization codes for specific maintenance tasks (e.g., engine run-up)
+  certifications String[] @default([])
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // Relations
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// Compliances the user performed (technician sign-off)
+  compliancesPerformed  Compliance[] @relation("PerformedBy")
+  /// Compliances the user inspected (inspector independent sign-off)
+  compliancesInspected  Compliance[] @relation("InspectedBy")
+
+  @@unique([email, organizationId])
+  @@index([organizationId])
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  AIRCRAFT  (MAT = Matrícula, primary registration identifier)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Aircraft {
+  id                 String        @id @default(uuid()) @db.Uuid
+  organizationId     String        @db.Uuid
+
+  /// Registration mark (MAT) — unique within the organization, used as PK reference in operations
+  registration       String        @db.VarChar(20)             // e.g. XA-GRI, EC-MJF
+
+  model              String        @db.VarChar(150)            // e.g. Boeing 737-800
+  manufacturer       String        @db.VarChar(150)            // e.g. Boeing
+  serialNumber       String        @db.VarChar(100)            // Manufacturer's serial number (MSN)
+  engineCount        Int           @default(2)
+
+  /// Engine model for combined airframe+engine task applicability
+  engineModel        String?       @db.VarChar(100)
+
+  /// Accumulated flight hours since new (Hobbs / Airframe Total Time)
+  totalFlightHours   Decimal       @default(0) @db.Decimal(10, 2)
+
+  /// Landings / pressurisation cycles since new
+  totalCycles        Int           @default(0)
+
+  /// Current status — AOG triggers alerts across all open orders
+  status             AircraftStatus @default(OPERATIONAL)
+
+  manufactureDate    DateTime?     @db.Date
+  registrationDate   DateTime?     @db.Date
+
+  /// Certificate of Airworthiness expiry
+  coaExpiryDate      DateTime?     @db.Date
+
+  /// Insurance expiry date
+  insuranceExpiryDate DateTime?    @db.Date
+
+  isActive           Boolean       @default(true)
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  // Relations
+  organization       Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  components         Component[]
+
+  /// M:N — which maintenance tasks apply to this aircraft
+  applicableTasks    AircraftTask[]
+  compliances        Compliance[]
+
+  // Indexes for common lookups
+  @@unique([registration, organizationId])
+  @@index([organizationId])
+  @@index([registration])                    // fast search by MAT
+  @@index([status, organizationId])          // AOG dashboard queries
+  @@map("aircraft")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  COMPONENT  (EQ — Equipamiento con trazabilidad de número de serie)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Component {
+  id             String          @id @default(uuid()) @db.Uuid
+  organizationId String          @db.Uuid
+
+  /// Currently installed on which aircraft (null = in store/shop)
+  aircraftId     String?         @db.Uuid
+
+  /// Part Number (P/N) — identifies the component type/design
+  partNumber     String          @db.VarChar(100)
+
+  /// Serial Number (S/N) — uniquely identifies this physical unit
+  serialNumber   String          @db.VarChar(100)
+
+  description    String          @db.VarChar(255)
+  manufacturer   String          @db.VarChar(150)
+
+  /// Where on the aircraft this is installed (e.g. "Engine 1 (CFM56-7B)", "LH MLG")
+  position       String?         @db.VarChar(100)
+
+  // ── Life tracking ──────────────────────────────────────────────────────────
+
+  /// Total Accumulated Hours since new (used for TBO/life-limit checks)
+  totalHoursSinceNew    Decimal  @default(0) @db.Decimal(10, 2)
+
+  /// Total Accumulated Cycles since new
+  totalCyclesSinceNew   Int      @default(0)
+
+  /// Total Hours since last overhaul (resets at each shop visit)
+  hoursSinceOverhaul    Decimal  @default(0) @db.Decimal(10, 2)
+
+  /// Cycles since last overhaul
+  cyclesSinceOverhaul   Int      @default(0)
+
+  // ── TBO limits ─────────────────────────────────────────────────────────────
+
+  /// Time Between Overhaul — hours limit (null = not applicable)
+  tboHours       Decimal?        @db.Decimal(10, 2)
+
+  /// Time Between Overhaul — cycles limit
+  tboCycles      Int?
+
+  /// Time Between Overhaul — calendar days limit
+  tboCalendarDays Int?
+
+  // ── Hard life limits (cannot be extended) ─────────────────────────────────
+
+  lifeLimitHours  Decimal?       @db.Decimal(10, 2)
+  lifeLimitCycles Int?
+
+  // ── Installation data (populated when component is fitted) ─────────────────
+
+  installationDate    DateTime?  @db.Date
+  /// Aircraft hours at the time of installation (for interval tracking)
+  installationAircraftHours Decimal? @db.Decimal(10, 2)
+  installationAircraftCycles Int?
+
+  status         ComponentStatus @default(SERVICEABLE)
+  isActive       Boolean         @default(true)
+  notes          String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  // Relations
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  aircraft       Aircraft?       @relation(fields: [aircraftId], references: [id])
+
+  /// M:N — which maintenance tasks apply to this component
+  applicableTasks ComponentTask[]
+  compliances     Compliance[]
+
+  @@unique([serialNumber, organizationId])
+  @@index([organizationId])
+  @@index([aircraftId])
+  @@index([partNumber, organizationId])
+  @@index([status, organizationId])
+  @@map("components")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  MAINTENANCE TASK  (Task Definition / Card)
+//  Represents the DEFINITION of an inspection, overhaul, replacement, etc.
+//  Actual execution is recorded in Compliance.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model MaintenanceTask {
+  id             String          @id @default(uuid()) @db.Uuid
+  organizationId String          @db.Uuid
+
+  /// Human-readable task code (e.g. "50H-INSP", "A-CHECK", "AD-2024-15-01")
+  code           String          @db.VarChar(100)
+
+  title          String          @db.VarChar(255)
+  description    String
+
+  intervalType   TaskIntervalType
+
+  // ── Recurrence intervals (set the applicable ones based on intervalType) ───
+
+  /// Primary interval in flight hours (e.g. 100.00)
+  intervalHours  Decimal?        @db.Decimal(10, 2)
+
+  /// Primary interval in cycles/landings
+  intervalCycles Int?
+
+  /// Primary interval in calendar days (e.g. 365 for annual)
+  intervalCalendarDays Int?
+
+  // ── Tolerances (grace period before task becomes overdue) ──────────────────
+
+  toleranceHours       Decimal?  @db.Decimal(8, 2)
+  toleranceCycles      Int?
+  toleranceCalendarDays Int?
+
+  // ── Regulatory/technical reference ────────────────────────────────────────
+
+  /// Reference identifier (AD number, AMM chapter/section, SB number)
+  referenceNumber String?        @db.VarChar(100)
+  referenceType   ReferenceType  @default(AMM)
+
+  /// True = regulatory mandatory (AD, CMR). False = manufacturer/operator rec.
+  isMandatory     Boolean        @default(false)
+
+  /// Estimated man-hours to perform the task
+  estimatedManHours Decimal?     @db.Decimal(6, 2)
+
+  /// Whether an independent inspection (RII) is required after this task
+  requiresInspection Boolean     @default(false)
+
+  /// Specific aircraft model this task applies to (null = all models)
+  applicableModel String?        @db.VarChar(150)
+
+  /// Specific part number this task applies to (null = aircraft-level task)
+  applicablePartNumber String?   @db.VarChar(100)
+
+  isActive        Boolean        @default(true)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  // Relations
+  organization    Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// M:N — aircraft that have this task assigned
+  aircraftLinks   AircraftTask[]
+
+  /// M:N — components that have this task assigned
+  componentLinks  ComponentTask[]
+
+  compliances     Compliance[]
+
+  @@unique([code, organizationId])
+  @@index([organizationId])
+  @@index([isMandatory, organizationId])
+  @@index([referenceType, organizationId])
+  @@map("maintenance_tasks")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  AIRCRAFT TASK  (M:N join — aircraft ↔ maintenance tasks)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model AircraftTask {
+  id         String   @id @default(uuid()) @db.Uuid
+
+  aircraftId String   @db.Uuid
+  taskId     String   @db.Uuid
+
+  /// Override interval at aircraft level (e.g. operator escalation approved by authority)
+  overrideIntervalHours  Decimal? @db.Decimal(10, 2)
+  overrideIntervalCycles Int?
+
+  isActive   Boolean  @default(true)
+  assignedAt DateTime @default(now())
+
+  aircraft   Aircraft        @relation(fields: [aircraftId], references: [id], onDelete: Cascade)
+  task       MaintenanceTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([aircraftId, taskId])
+  @@index([aircraftId])
+  @@index([taskId])
+  @@map("aircraft_tasks")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  COMPONENT TASK  (M:N join — component ↔ maintenance tasks)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ComponentTask {
+  id          String   @id @default(uuid()) @db.Uuid
+
+  componentId String   @db.Uuid
+  taskId      String   @db.Uuid
+
+  isActive    Boolean  @default(true)
+  assignedAt  DateTime @default(now())
+
+  component   Component       @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  task        MaintenanceTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([componentId, taskId])
+  @@index([componentId])
+  @@index([taskId])
+  @@map("component_tasks")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  COMPLIANCE  (Cumplimiento — historical record of task execution)
+//  This is the audit core. Once written, records must be immutable.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Compliance {
+  id             String           @id @default(uuid()) @db.Uuid
+  organizationId String           @db.Uuid
+
+  /// The aircraft this compliance record belongs to
+  aircraftId     String           @db.Uuid
+
+  /// The task definition that was performed
+  taskId         String           @db.Uuid
+
+  /// The component this compliance applies to (null = airframe-level task)
+  componentId    String?          @db.Uuid
+
+  /// Technician who performed the work
+  performedById  String           @db.Uuid
+
+  /// Inspector who independently verified the work (RII sign-off, null if not required)
+  inspectedById  String?          @db.Uuid
+
+  // ── When it was done ───────────────────────────────────────────────────────
+
+  performedAt           DateTime
+  /// Aircraft total hours at time of compliance
+  aircraftHoursAtCompliance  Decimal   @db.Decimal(10, 2)
+  /// Aircraft total cycles at time of compliance
+  aircraftCyclesAtCompliance Int
+
+  // ── Next due values (pre-calculated at record time) ───────────────────────
+  //  These are IMMUTABLE after creation — next cycle recalculates from new compliance
+
+  nextDueHours          Decimal?   @db.Decimal(10, 2)
+  nextDueCycles         Int?
+  nextDueDate           DateTime?  @db.Date
+
+  // ── Work order reference ──────────────────────────────────────────────────
+
+  /// Internal work order number linking to the maintenance package
+  workOrderNumber String?          @db.VarChar(50)
+
+  status         ComplianceStatus  @default(COMPLETED)
+
+  /// If deferred: MEL/NEF item reference and expiry
+  deferralReference String?        @db.VarChar(100)
+  deferralExpiresAt DateTime?
+
+  notes          String?
+  createdAt      DateTime          @default(now())
+
+  // ── No updatedAt — compliance records should be append-only ──────────────
+
+  // Relations
+  organization   Organization      @relation(fields: [organizationId], references: [id])
+  aircraft       Aircraft          @relation(fields: [aircraftId], references: [id])
+  task           MaintenanceTask   @relation(fields: [taskId], references: [id])
+  component      Component?        @relation(fields: [componentId], references: [id])
+  performedBy    User              @relation("PerformedBy", fields: [performedById], references: [id])
+  inspectedBy    User?             @relation("InspectedBy", fields: [inspectedById], references: [id])
+
+  // ── Indexes for the two most critical queries ─────────────────────────────
+  // 1. "What is the current due-status for each task on this aircraft?"
+  @@index([aircraftId, taskId])
+  // 2. "What tasks are overdue / coming due across the fleet?"
+  @@index([nextDueHours, organizationId])
+  @@index([nextDueDate, organizationId])
+  @@index([organizationId, status])
+  @@index([componentId])
+  @@map("compliances")
+}
