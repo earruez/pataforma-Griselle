@@ -29,11 +29,24 @@ export interface Compliance {
   } | null;
 }
 
+export interface RecordComplianceInput {
+  aircraftId: string;
+  taskId: string;
+  performedAt: string;   // ISO date string
+  workOrderNumber?: string | null;
+  notes?: string | null;
+}
+
 export const complianceApi = {
   latestForAircraft: async (aircraftId: string): Promise<Compliance[]> => {
     const { data } = await apiClient.get<{ status: string; data: Compliance[] }>(
       `/compliances/aircraft/${aircraftId}/latest`,
     );
+    return data.data;
+  },
+
+  record: async (input: RecordComplianceInput): Promise<Compliance> => {
+    const { data } = await apiClient.post<{ status: string; data: Compliance }>('/compliances', input);
     return data.data;
   },
 };

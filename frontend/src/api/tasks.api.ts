@@ -1,0 +1,76 @@
+import { apiClient } from './client';
+import { MaintenanceTask } from './maintenancePlan.api';
+
+export type { MaintenanceTask };
+
+export interface CreateTaskInput {
+  code: string;
+  title: string;
+  description: string;
+  intervalType: string;
+  intervalHours?: number | null;
+  intervalCycles?: number | null;
+  intervalCalendarDays?: number | null;
+  toleranceHours?: number | null;
+  toleranceCycles?: number | null;
+  toleranceCalendarDays?: number | null;
+  referenceType: string;
+  referenceNumber?: string | null;
+  isMandatory: boolean;
+  estimatedManHours?: number | null;
+  requiresInspection: boolean;
+  applicableModel?: string | null;
+  applicablePartNumber?: string | null;
+}
+
+export type UpdateTaskInput = Partial<Omit<CreateTaskInput, 'code'>>;
+
+export interface TaskDefinition {
+  id: string;
+  organizationId: string;
+  code: string;
+  title: string;
+  description: string;
+  intervalType: string;
+  intervalHours: number | null;
+  intervalCycles: number | null;
+  intervalCalendarDays: number | null;
+  toleranceHours: number | null;
+  toleranceCycles: number | null;
+  toleranceCalendarDays: number | null;
+  referenceType: string;
+  referenceNumber: string | null;
+  isMandatory: boolean;
+  estimatedManHours: number | null;
+  requiresInspection: boolean;
+  applicableModel: string | null;
+  applicablePartNumber: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const tasksApi = {
+  listAll: async (): Promise<TaskDefinition[]> => {
+    const { data } = await apiClient.get<{ status: string; data: TaskDefinition[] }>('/tasks');
+    return data.data;
+  },
+
+  create: async (input: CreateTaskInput): Promise<TaskDefinition> => {
+    const { data } = await apiClient.post<{ status: string; data: TaskDefinition }>('/tasks', input);
+    return data.data;
+  },
+
+  update: async (id: string, input: UpdateTaskInput): Promise<TaskDefinition> => {
+    const { data } = await apiClient.patch<{ status: string; data: TaskDefinition }>(`/tasks/${id}`, input);
+    return data.data;
+  },
+
+  assignToAircraft: async (aircraftId: string, taskId: string): Promise<void> => {
+    await apiClient.post(`/tasks/aircraft/${aircraftId}/assign`, { taskId });
+  },
+
+  removeFromAircraft: async (aircraftId: string, taskId: string): Promise<void> => {
+    await apiClient.delete(`/tasks/aircraft/${aircraftId}/tasks/${taskId}`);
+  },
+};

@@ -65,6 +65,12 @@ export class RecordComplianceUseCase {
 
     const complianceInput: CreateComplianceInput = {
       ...input,
+      workOrderNumber: input.workOrderNumber ?? null,
+      componentId:     input.componentId     ?? null,
+      inspectedById:   input.inspectedById   ?? null,
+      notes:           input.notes           ?? null,
+      deferralReference: input.deferralReference ?? null,
+      deferralExpiresAt: input.deferralExpiresAt ?? null,
       aircraftHoursAtCompliance: aircraft.totalFlightHours,
       aircraftCyclesAtCompliance: aircraft.totalCycles,
       nextDueHours,

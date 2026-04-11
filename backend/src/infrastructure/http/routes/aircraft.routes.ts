@@ -6,6 +6,7 @@ import {
   CreateAircraftUseCase,
   GetAircraftUseCase,
   UpdateAircraftUseCase,
+  GetMaintenancePlanUseCase,
 } from '../../../application/aircraft/AircraftUseCases';
 import { PrismaAircraftRepository } from '../../database/repositories/PrismaAircraftRepository';
 
@@ -15,10 +16,12 @@ const ctrl = new AircraftController(
   new CreateAircraftUseCase(repo),
   new GetAircraftUseCase(repo),
   new UpdateAircraftUseCase(repo),
+  new GetMaintenancePlanUseCase(repo),
 );
 
 router.use(authMiddleware, tenantMiddleware);
 router.get('/', ctrl.findAll);
+router.get('/:id/maintenance-plan', ctrl.getMaintenancePlan);
 router.get('/:id', ctrl.findById);
 router.post('/', ctrl.create);
 router.patch('/:id', ctrl.update);

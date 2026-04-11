@@ -38,6 +38,8 @@ export type CreateAircraftInput = Pick<
   | 'serialNumber'
   | 'engineCount'
   | 'engineModel'
+  | 'totalFlightHours'
+  | 'totalCycles'
   | 'manufactureDate'
   | 'registrationDate'
   | 'coaExpiryDate'

@@ -17,13 +17,28 @@ export interface Aircraft {
   insuranceExpiryDate: string | null;
 }
 
+export interface CreateAircraftInput {
+  registration: string;
+  manufacturer: string;
+  model: string;
+  serialNumber: string;
+  totalFlightHours?: number;
+  totalCycles?: number;
+  engineCount?: number;
+  engineModel?: string | null;
+}
+
 export const aircraftApi = {
-  findAll: async (page = 1, limit = 20) => {
-    const { data } = await apiClient.get('/aircraft', { params: { page, limit } });
-    return data as { data: Aircraft[]; total: number; page: number; totalPages: number };
+  findAll: async (): Promise<Aircraft[]> => {
+    const { data } = await apiClient.get('/aircraft', { params: { page: 1, limit: 100 } });
+    return (data.data ?? data) as Aircraft[];
   },
   findById: async (id: string): Promise<Aircraft> => {
     const { data } = await apiClient.get<{ status: string; data: Aircraft }>(`/aircraft/${id}`);
+    return data.data;
+  },
+  create: async (input: CreateAircraftInput): Promise<Aircraft> => {
+    const { data } = await apiClient.post<{ status: string; data: Aircraft }>('/aircraft', input);
     return data.data;
   },
 };

@@ -8,12 +8,24 @@ import { errorHandler } from './infrastructure/http/middlewares/errorHandler';
 import { authRoutes } from './infrastructure/http/routes/auth.routes';
 import { aircraftRoutes } from './infrastructure/http/routes/aircraft.routes';
 import { complianceRoutes } from './infrastructure/http/routes/compliance.routes';
+import { componentRoutes } from './infrastructure/http/routes/component.routes';
+import { taskRoutes } from './infrastructure/http/routes/tasks.routes';
+import { workOrderRoutes } from './infrastructure/http/routes/workOrders.routes';
+import { componentHistoryRouter, aircraftHistoryRouter, auditRouter } from './infrastructure/http/routes/componentHistory.routes';
 
 export function createApp(): Application {
   const app = express();
 
   app.use(helmet());
-  app.use(cors({ origin: env.CORS_ORIGIN, credentials: true }));
+  app.use(cors({
+    origin: (origin, cb) => {
+      // Allow requests with no origin (curl, Postman) or any localhost port in dev
+      if (!origin || /^https?:\/\/localhost(:\d+)?$/.test(origin)) return cb(null, true);
+      if (origin === env.CORS_ORIGIN) return cb(null, true);
+      cb(new Error('Not allowed by CORS'));
+    },
+    credentials: true,
+  }));
   app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false }));
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: true }));
@@ -24,9 +36,15 @@ export function createApp(): Application {
   });
 
   const API = '/api/v1';
-  app.use(`${API}/auth`, authRoutes);
-  app.use(`${API}/aircraft`, aircraftRoutes);
-  app.use(`${API}/compliances`, complianceRoutes);
+  app.use(`${API}/auth`,             authRoutes);
+  app.use(`${API}/aircraft`,         aircraftRoutes);
+  app.use(`${API}/aircraft`,         aircraftHistoryRouter);
+  app.use(`${API}/compliances`,      complianceRoutes);
+  app.use(`${API}/components`,       componentRoutes);
+  app.use(`${API}/components`,       componentHistoryRouter);
+  app.use(`${API}/tasks`,            taskRoutes);
+  app.use(`${API}/work-orders`,      workOrderRoutes);
+  app.use(`${API}/audit-logs`,       auditRouter);
 
   app.use((_req: Request, res: Response) => {
     res.status(404).json({ status: 'error', code: 'NOT_FOUND', message: 'Route not found' });

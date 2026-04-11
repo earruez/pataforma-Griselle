@@ -1,10 +1,18 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { useEffect } from 'react';
 import { useAuthStore } from '@store/authStore';
+import { authApi } from '@api/auth.api';
 import LoginPage from '@pages/LoginPage';
 import DashboardPage from '@pages/DashboardPage';
 import AircraftPage from '@pages/AircraftPage';
 import ComponentsPage from '@pages/ComponentsPage';
 import CompliancePage from '@pages/CompliancePage';
+import MaintenancePlanPage from '@pages/MaintenancePlanPage';
+import WorkOrdersPage from '@pages/WorkOrdersPage';
+import WorkOrderDetailPage from '@pages/WorkOrderDetailPage';
+import ReportsPage from '@pages/ReportsPage';
+import SettingsPage from '@pages/SettingsPage';
+import NotificationsPage from '@pages/NotificationsPage';
 import AppLayout from '@components/layout/AppLayout';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -12,9 +20,25 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
   return token ? <>{children}</> : <Navigate to="/login" replace />;
 }
 
+/** Validates the stored session against the DB on every app load.
+ *  If the organizationId in the JWT is stale (e.g. after a DB reseed),
+ *  the server returns 401, the axios interceptor calls logout(), and the
+ *  PrivateRoute redirects to /login automatically. */
+function SessionGuard() {
+  const token = useAuthStore((s) => s.token);
+  useEffect(() => {
+    if (token) {
+      authApi.me().catch(() => { /* 401 handled by axios interceptor → logout + redirect */ });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // run once on mount
+  return null;
+}
+
 export default function App() {
   return (
     <BrowserRouter>
+      <SessionGuard />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route element={<PrivateRoute><AppLayout /></PrivateRoute>}>
@@ -23,6 +47,12 @@ export default function App() {
           <Route path="/aircraft" element={<AircraftPage />} />
           <Route path="/components" element={<ComponentsPage />} />
           <Route path="/compliance" element={<CompliancePage />} />
+          <Route path="/maintenance-plan" element={<MaintenancePlanPage />} />
+          <Route path="/work-orders" element={<WorkOrdersPage />} />
+          <Route path="/work-orders/:id" element={<WorkOrderDetailPage />} />
+          <Route path="/reports" element={<ReportsPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/notificaciones" element={<NotificationsPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

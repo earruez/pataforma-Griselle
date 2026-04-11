@@ -1,5 +1,5 @@
 import { Aircraft, CreateAircraftInput, UpdateAircraftInput } from '../../domain/entities/Aircraft';
-import { IAircraftRepository } from '../../domain/repositories/IAircraftRepository';
+import { IAircraftRepository, MaintenancePlanItem } from '../../domain/repositories/IAircraftRepository';
 import { PaginatedResult, PaginationOptions } from '../../domain/repositories/shared';
 import { ConflictError, NotFoundError } from '../../shared/errors/AppError';
 
@@ -45,5 +45,15 @@ export class UpdateAircraftUseCase {
     const aircraft = await this.repo.findById(id, organizationId);
     if (!aircraft) throw new NotFoundError('Aircraft', id);
     return this.repo.update(id, organizationId, input);
+  }
+}
+
+export class GetMaintenancePlanUseCase {
+  constructor(private readonly repo: IAircraftRepository) {}
+
+  async execute(aircraftId: string, organizationId: string): Promise<MaintenancePlanItem[]> {
+    const aircraft = await this.repo.findById(aircraftId, organizationId);
+    if (!aircraft) throw new NotFoundError('Aircraft', aircraftId);
+    return this.repo.getMaintenancePlan(aircraftId, organizationId);
   }
 }

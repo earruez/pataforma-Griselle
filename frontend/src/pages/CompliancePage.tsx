@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { aircraftApi } from '@api/aircraft.api';
 import { complianceApi, type Compliance } from '@api/compliance.api';
+import { Wrench, ChevronDown } from 'lucide-react';
 
 function dueBadge(c: Compliance): { label: string; cls: string } {
   const today = Date.now();
@@ -31,40 +32,50 @@ export default function CompliancePage() {
 
   return (
     <div className="p-8 space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold text-gray-900">Cumplimientos</h2>
-        <p className="text-sm text-gray-500 mt-1">Estado actual de tareas por aeronave — registro de auditoría aeronáutico</p>
+      {/* Page header */}
+      <div className="flex items-center gap-3">
+        <div className="w-9 h-9 bg-brand-50 rounded-lg flex items-center justify-center">
+          <Wrench size={18} className="text-brand-600" />
+        </div>
+        <div>
+          <h1 className="text-xl font-bold text-slate-900">Cumplimientos</h1>
+          <p className="text-sm text-slate-500">Estado actual de tareas por aeronave — registro de auditoría aeronáutico</p>
+        </div>
       </div>
 
-      <div className="flex items-center gap-4">
-        <label className="text-sm font-medium text-gray-700">Aeronave:</label>
-        <select
-          value={selectedAircraftId}
-          onChange={(e) => setSelectedAircraftId(e.target.value)}
-          className="input-base w-auto min-w-60"
-        >
-          <option value="">— Seleccionar aeronave —</option>
-          {aircraft.map((a) => (
-            <option key={a.id} value={a.id}>{a.registration} — {a.model}</option>
-          ))}
-        </select>
+      {/* Aircraft selector */}
+      <div className="filter-bar">
+        <label className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest shrink-0">Aeronave</label>
+        <div className="relative">
+          <select
+            value={selectedAircraftId}
+            onChange={(e) => setSelectedAircraftId(e.target.value)}
+            className="filter-input pr-8 min-w-56 appearance-none cursor-pointer"
+          >
+            <option value="">— Seleccionar aeronave —</option>
+            {aircraft.map((a) => (
+              <option key={a.id} value={a.id}>{a.registration} — {a.model}</option>
+            ))}
+          </select>
+          <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+        </div>
         {selected && (
-          <span className="text-sm text-gray-500">
+          <span className="text-xs text-slate-500 ml-1">
             {Number(selected.totalFlightHours).toFixed(1)} h · {selected.totalCycles} ciclos
           </span>
         )}
       </div>
 
       {!selectedAircraftId && (
-        <div className="bg-white rounded-xl shadow-sm p-12 text-center text-gray-400">
+        <div className="bg-white rounded-xl border border-slate-200 shadow-card p-16 text-center text-slate-400">
           Selecciona una aeronave para ver sus cumplimientos
         </div>
       )}
 
       {selectedAircraftId && (
-        <div className="bg-white rounded-xl shadow-sm overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-100 text-sm">
-            <thead className="bg-gray-50 text-xs uppercase text-gray-500">
+        <div className="bg-white rounded-xl border border-slate-200 shadow-card overflow-x-auto">
+          <table className="min-w-full divide-y divide-slate-100 text-sm">
+            <thead className="bg-slate-50">
               <tr>
                 <th className="table-header">Tarea</th>
                 <th className="table-header">Ref. regulatoria</th>
@@ -77,32 +88,32 @@ export default function CompliancePage() {
                 <th className="table-header">Estado</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100">
+            <tbody className="divide-y divide-slate-100">
               {isLoading && (
-                <tr><td colSpan={9} className="table-cell text-center text-gray-400 py-8">Cargando…</td></tr>
+                <tr><td colSpan={9} className="table-cell text-center text-slate-400 py-12">Cargando…</td></tr>
               )}
               {!isLoading && records.length === 0 && (
-                <tr><td colSpan={9} className="table-cell text-center text-gray-400 py-8">No hay registros de cumplimiento para esta aeronave</td></tr>
+                <tr><td colSpan={9} className="table-cell text-center text-slate-400 py-12">No hay registros de cumplimiento para esta aeronave</td></tr>
               )}
               {records.map((c) => {
                 const { label, cls } = dueBadge(c);
                 const isOverdue = cls === 'badge-overdue';
                 return (
-                  <tr key={c.id} className={`transition-colors ${isOverdue ? 'bg-red-50 hover:bg-red-100' : 'hover:bg-gray-50'}`}>
-                    <td className={`table-cell font-medium ${isOverdue ? 'text-red-700' : ''}`}>{c.task?.code ?? '—'}</td>
-                    <td className="table-cell text-xs text-gray-500">{c.task?.referenceType} {c.task?.referenceNumber}</td>
-                    <td className="table-cell text-xs">{new Date(c.performedAt).toLocaleDateString('es-MX')}</td>
+                  <tr key={c.id} className={`transition-colors ${isOverdue ? 'bg-rose-50 hover:bg-rose-100/70' : 'hover:bg-slate-50'}`}>
+                    <td className={`table-cell font-medium ${isOverdue ? 'text-rose-700' : 'text-slate-700'}`}>{c.task?.code ?? '—'}</td>
+                    <td className="table-cell text-xs text-slate-500">{c.task?.referenceType} {c.task?.referenceNumber}</td>
+                    <td className="table-cell text-xs text-slate-500">{new Date(c.performedAt).toLocaleDateString('es-MX')}</td>
                     <td className="table-cell text-right tabular-nums">{Number(c.aircraftHoursAtCompliance).toFixed(1)}</td>
-                    <td className={`table-cell text-right tabular-nums ${isOverdue ? 'text-red-600 font-semibold' : ''}`}>
+                    <td className={`table-cell text-right tabular-nums ${isOverdue ? 'text-rose-600 font-semibold' : ''}`}>
                       {c.nextDueHours != null ? c.nextDueHours.toFixed(1) : '—'}
                     </td>
-                    <td className={`table-cell text-right tabular-nums ${isOverdue ? 'text-red-600 font-semibold' : ''}`}>
+                    <td className={`table-cell text-right tabular-nums ${isOverdue ? 'text-rose-600 font-semibold' : ''}`}>
                       {c.nextDueCycles != null ? c.nextDueCycles : '—'}
                     </td>
-                    <td className={`table-cell text-xs ${isOverdue ? 'text-red-600 font-semibold' : ''}`}>
+                    <td className={`table-cell text-xs ${isOverdue ? 'text-rose-600 font-semibold' : 'text-slate-500'}`}>
                       {c.nextDueDate ? new Date(c.nextDueDate).toLocaleDateString('es-MX') : '—'}
                     </td>
-                    <td className="table-cell text-xs text-gray-500">{c.inspectedBy?.name ?? '—'}</td>
+                    <td className="table-cell text-xs text-slate-500">{c.inspectedBy?.name ?? '—'}</td>
                     <td className="table-cell">
                       <span className={cls}>{label}</span>
                     </td>

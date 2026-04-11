@@ -4,6 +4,7 @@ import {
   CreateAircraftUseCase,
   GetAircraftUseCase,
   UpdateAircraftUseCase,
+  GetMaintenancePlanUseCase,
 } from '../../../application/aircraft/AircraftUseCases';
 
 const createSchema = z.object({
@@ -13,6 +14,8 @@ const createSchema = z.object({
   serialNumber: z.string().min(1).max(100),
   engineCount: z.number().int().min(1).max(4).default(2),
   engineModel: z.string().max(100).optional().nullable(),
+  totalFlightHours: z.number().nonnegative().optional().default(0),
+  totalCycles: z.number().int().nonnegative().optional().default(0),
   manufactureDate: z.coerce.date().optional().nullable(),
   registrationDate: z.coerce.date().optional().nullable(),
   coaExpiryDate: z.coerce.date().optional().nullable(),
@@ -41,12 +44,23 @@ export class AircraftController {
     private readonly createUseCase: CreateAircraftUseCase,
     private readonly getUseCase: GetAircraftUseCase,
     private readonly updateUseCase: UpdateAircraftUseCase,
+    private readonly planUseCase: GetMaintenancePlanUseCase,
   ) {}
 
   create = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const body = createSchema.parse(req.body);
-      const aircraft = await this.createUseCase.execute({ ...body, organizationId: req.organizationId });
+      const aircraft = await this.createUseCase.execute({
+        ...body,
+        engineModel:          body.engineModel          ?? null,
+        totalFlightHours:     body.totalFlightHours     ?? 0,
+        totalCycles:          body.totalCycles          ?? 0,
+        manufactureDate:      body.manufactureDate      ?? null,
+        registrationDate:     body.registrationDate     ?? null,
+        coaExpiryDate:        body.coaExpiryDate        ?? null,
+        insuranceExpiryDate:  body.insuranceExpiryDate  ?? null,
+        organizationId:       req.organizationId,
+      });
       res.status(201).json({ status: 'success', data: aircraft });
     } catch (err) { next(err); }
   };
@@ -71,6 +85,13 @@ export class AircraftController {
       const body = updateSchema.parse(req.body);
       const aircraft = await this.updateUseCase.execute(req.params.id, req.organizationId, body);
       res.status(200).json({ status: 'success', data: aircraft });
+    } catch (err) { next(err); }
+  };
+
+  getMaintenancePlan = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const plan = await this.planUseCase.execute(req.params.id, req.organizationId);
+      res.status(200).json({ status: 'success', data: plan });
     } catch (err) { next(err); }
   };
 }

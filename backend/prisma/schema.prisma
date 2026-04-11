@@ -91,6 +91,33 @@ enum ComplianceStatus {
   @@map("compliance_status")
 }
 
+/// Work order lifecycle — transitions enforced by WorkOrderService
+enum WorkOrderStatus {
+  DRAFT         // Borrador — being assembled, not yet executable
+  OPEN          // Abierta — approved, ready to execute
+  IN_PROGRESS   // En ejecución — work has started
+  QUALITY       // En calidad — awaiting independent inspector sign-off
+  CLOSED        // Cerrada — inspector approved and signed off
+
+  @@map("work_order_status")
+}
+
+enum DiscrepancyStatus {
+  OPEN          // Hallazgo abierto, pendiente de acción
+  DEFERRED      // Diferido con referencia MEL/CDL
+  RESOLVED      // Resuelto, trabajo completado
+  CANCELLED     // Cancelado (error de registro, etc.)
+
+  @@map("discrepancy_status")
+}
+
+enum ComponentMovementType {
+  INSTALLED     // Componente instalado en aeronave
+  REMOVED       // Componente removido de aeronave
+
+  @@map("component_movement_type")
+}
+
 enum UserRole {
   ADMIN             // Full access, user management
   SUPERVISOR        // Approve work orders, sign-off compliances
@@ -124,6 +151,8 @@ model Organization {
   components         Component[]
   maintenanceTasks   MaintenanceTask[]
   compliances        Compliance[]
+  workOrders         WorkOrder[]
+  discrepancies      Discrepancy[]
 
   @@map("organizations")
 }
@@ -154,9 +183,18 @@ model User {
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   /// Compliances the user performed (technician sign-off)
-  compliancesPerformed  Compliance[] @relation("PerformedBy")
+  compliancesPerformed  Compliance[]    @relation("PerformedBy")
   /// Compliances the user inspected (inspector independent sign-off)
-  compliancesInspected  Compliance[] @relation("InspectedBy")
+  compliancesInspected  Compliance[]    @relation("InspectedBy")
+
+  workOrdersCreated        WorkOrder[]    @relation("WOCreatedBy")
+  workOrdersAssigned       WorkOrder[]    @relation("WOAssignedTo")
+  workOrdersInspecting     WorkOrder[]    @relation("WOInspector")
+  workOrdersClosed         WorkOrder[]    @relation("WOClosedBy")
+  workOrderTasksCompleted  WorkOrderTask[] @relation("WOTaskCompletedBy")
+  discrepanciesFound       Discrepancy[]  @relation("DiscrepancyFoundBy")
+  discrepanciesResolved    Discrepancy[]  @relation("DiscrepancyResolvedBy")
+  componentMovements       ComponentHistory[] @relation("ComponentMovedBy")
 
   @@unique([email, organizationId])
   @@index([organizationId])
@@ -211,6 +249,8 @@ model Aircraft {
   /// M:N — which maintenance tasks apply to this aircraft
   applicableTasks    AircraftTask[]
   compliances        Compliance[]
+  workOrders         WorkOrder[]
+  componentHistory   ComponentHistory[]
 
   // Indexes for common lookups
   @@unique([registration, organizationId])
@@ -293,6 +333,7 @@ model Component {
   /// M:N — which maintenance tasks apply to this component
   applicableTasks ComponentTask[]
   compliances     Compliance[]
+  history         ComponentHistory[]
 
   @@unique([serialNumber, organizationId])
   @@index([organizationId])
@@ -372,6 +413,7 @@ model MaintenanceTask {
   componentLinks  ComponentTask[]
 
   compliances     Compliance[]
+  workOrderTasks  WorkOrderTask[]
 
   @@unique([code, organizationId])
   @@index([organizationId])
@@ -500,4 +542,241 @@ model Compliance {
   @@index([organizationId, status])
   @@index([componentId])
   @@map("compliances")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  WORK ORDER  (Orden de Trabajo / OT)
+//  Central work package. State machine: DRAFT→OPEN→IN_PROGRESS→QUALITY→CLOSED
+// ─────────────────────────────────────────────────────────────────────────────
+
+model WorkOrder {
+  id             String          @id @default(uuid()) @db.Uuid
+  organizationId String          @db.Uuid
+
+  /// Sequential WO number scoped to org (e.g. OT-2024-001)
+  number         String          @db.VarChar(50)
+
+  aircraftId     String          @db.Uuid
+  title          String          @db.VarChar(255)
+  description    String?
+
+  status         WorkOrderStatus @default(DRAFT)
+
+  /// User who opened/created this WO
+  createdById    String          @db.Uuid
+
+  /// Technician(s) assigned to execute the work
+  assignedTechnicianId String?   @db.Uuid
+
+  /// Inspector responsible for quality/close sign-off (must have INSPECTOR role)
+  inspectorId    String?         @db.Uuid
+
+  // ── Scheduling ────────────────────────────────────────────────────────────
+  plannedStartDate DateTime?     @db.Date
+  plannedEndDate   DateTime?     @db.Date
+  actualStartDate  DateTime?
+  actualEndDate    DateTime?
+
+  // ── Aircraft state snapshot at open/close ─────────────────────────────────
+  aircraftHoursAtOpen    Decimal?   @db.Decimal(10, 2)
+  aircraftCyclesAtOpen   Int?
+  aircraftHoursAtClose   Decimal?   @db.Decimal(10, 2)
+  aircraftCyclesAtClose  Int?
+
+  /// User who performed the final close sign-off (must have INSPECTOR role)
+  closedById     String?         @db.Uuid
+  closedAt       DateTime?
+
+  notes          String?
+  isActive       Boolean         @default(true)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  // Relations
+  organization         Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  aircraft             Aircraft        @relation(fields: [aircraftId], references: [id])
+  createdBy            User            @relation("WOCreatedBy",    fields: [createdById],            references: [id])
+  assignedTechnician   User?           @relation("WOAssignedTo",   fields: [assignedTechnicianId],   references: [id])
+  inspector            User?           @relation("WOInspector",    fields: [inspectorId],            references: [id])
+  closedBy             User?           @relation("WOClosedBy",     fields: [closedById],             references: [id])
+
+  tasks                WorkOrderTask[]
+  discrepancies        Discrepancy[]
+  componentMovements   ComponentHistory[]
+  auditLogs            AuditLog[]
+
+  @@unique([number, organizationId])
+  @@index([organizationId])
+  @@index([aircraftId])
+  @@index([status, organizationId])
+  @@index([createdById])
+  @@map("work_orders")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  WORK ORDER TASK  (Task line-items within a WO)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model WorkOrderTask {
+  id             String   @id @default(uuid()) @db.Uuid
+  workOrderId    String   @db.Uuid
+  taskId         String   @db.Uuid
+
+  /// Whether the technician has completed and signed off this task
+  isCompleted    Boolean  @default(false)
+  completedAt    DateTime?
+  completedById  String?  @db.Uuid
+  notes          String?
+
+  workOrder      WorkOrder       @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+  task           MaintenanceTask @relation(fields: [taskId],      references: [id])
+  completedBy    User?           @relation("WOTaskCompletedBy",  fields: [completedById], references: [id])
+
+  @@unique([workOrderId, taskId])
+  @@index([workOrderId])
+  @@index([taskId])
+  @@map("work_order_tasks")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  DISCREPANCY  (Hallazgo / Discrepancia within a WO)
+//  Non-routine findings raised during execution. May be deferred via MEL/CDL.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Discrepancy {
+  id             String            @id @default(uuid()) @db.Uuid
+  organizationId String            @db.Uuid
+  workOrderId    String            @db.Uuid
+
+  /// Auto-generated sequential code: DC-{YEAR}-{SEQ} scoped to org
+  code           String            @db.VarChar(50)
+
+  title          String            @db.VarChar(255)
+  description    String
+
+  /// Physical location on aircraft (e.g. "LH flap track 3", "Frame 23")
+  location       String?           @db.VarChar(150)
+
+  /// Criticality / ATA chapter reference
+  ataChapter     String?           @db.VarChar(20)
+
+  status         DiscrepancyStatus @default(OPEN)
+
+  foundById      String            @db.Uuid
+  resolvedById   String?           @db.Uuid
+  resolvedAt     DateTime?
+  resolutionNotes String?
+
+  /// MEL/CDL deferral reference and expiry (if DEFERRED)
+  deferralRef    String?           @db.VarChar(100)
+  deferralExpiresAt DateTime?
+
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  // Relations
+  organization   Organization      @relation(fields: [organizationId], references: [id])
+  workOrder      WorkOrder         @relation(fields: [workOrderId],    references: [id], onDelete: Cascade)
+  foundBy        User              @relation("DiscrepancyFoundBy",     fields: [foundById],     references: [id])
+  resolvedBy     User?             @relation("DiscrepancyResolvedBy",  fields: [resolvedById],  references: [id])
+
+  @@index([workOrderId])
+  @@index([organizationId, status])
+  @@map("discrepancies")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  AUDIT LOG  (Trazabilidad — IMMUTABLE append-only log for DGAC compliance)
+//  Never update or delete rows. Foreign keys are intentionally left as strings
+//  so logs survive referenced entity deletion.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @db.Uuid
+
+  /// Entity type that changed (e.g. "WorkOrder", "Discrepancy", "Compliance")
+  entityType     String   @db.VarChar(50)
+
+  /// UUID of the changed entity
+  entityId       String   @db.Uuid
+
+  /// Human-readable action label (e.g. "STATUS_CHANGED", "TASK_COMPLETED", "DISCREPANCY_CREATED")
+  action         String   @db.VarChar(100)
+
+  /// Snapshot of the relevant field(s) before the change
+  previousValue  Json?
+
+  /// Snapshot of the relevant field(s) after the change
+  newValue       Json?
+
+  /// User who caused the change
+  userId         String   @db.Uuid
+  userEmail      String   @db.VarChar(255)
+  userRole       String   @db.VarChar(50)
+
+  /// Optional metadata (IP, user-agent, notes)
+  metadata       Json?
+
+  /// ── No updatedAt — this table is append-only ──
+  createdAt      DateTime @default(now())
+
+  // Optional relation to WorkOrder for quick lookups (nullable — log survives WO deletion)
+  workOrderId    String?  @db.Uuid
+  workOrder      WorkOrder? @relation(fields: [workOrderId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([organizationId])
+  @@index([userId])
+  @@index([workOrderId])
+  @@map("audit_logs")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  COMPONENT HISTORY  (Historial de instalación/remoción de componentes)
+//  Append-only. One row per installation, one row per removal.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ComponentHistory {
+  id             String               @id @default(uuid()) @db.Uuid
+  organizationId String               @db.Uuid
+
+  componentId    String               @db.Uuid
+  aircraftId     String               @db.Uuid
+
+  movementType   ComponentMovementType
+
+  // ── Aircraft state at time of movement ────────────────────────────────────
+  aircraftHoursAtMovement   Decimal   @db.Decimal(10, 2)
+  aircraftCyclesAtMovement  Int
+
+  // ── Component accumulated state at time of movement ───────────────────────
+  componentHoursAtMovement  Decimal   @db.Decimal(10, 2)
+  componentCyclesAtMovement Int
+
+  /// Position on aircraft (e.g. "Engine 1", "LH MLG", "Nose Gear")
+  position       String?              @db.VarChar(150)
+
+  /// Work order that authorized this movement (optional)
+  workOrderId    String?              @db.Uuid
+
+  performedById  String               @db.Uuid
+  notes          String?
+
+  movedAt        DateTime
+
+  /// ── No updatedAt — this table is append-only ──
+  createdAt      DateTime             @default(now())
+
+  // Relations
+  component      Component            @relation(fields: [componentId], references: [id])
+  aircraft       Aircraft             @relation(fields: [aircraftId],  references: [id])
+  workOrder      WorkOrder?           @relation(fields: [workOrderId], references: [id])
+  performedBy    User                 @relation("ComponentMovedBy",    fields: [performedById], references: [id])
+
+  @@index([componentId])
+  @@index([aircraftId])
+  @@index([organizationId])
+  @@index([workOrderId])
+  @@map("component_history")
 }
