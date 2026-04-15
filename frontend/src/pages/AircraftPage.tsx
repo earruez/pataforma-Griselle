@@ -1,10 +1,10 @@
-import { useState, useMemo } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'react-hot-toast';
 import { Plane, X, Loader2, AlertTriangle, ChevronDown, ChevronRight, Clock, TrendingDown, Info, FileText, User } from 'lucide-react';
 import { aircraftApi, type Aircraft, type CreateAircraftInput } from '@api/aircraft.api';
-import { libraryApi } from '@api/library.api';
+import { libraryApi, type AssignedPlanCategory, type MaintenanceTemplate } from '@api/library.api';
 import { maintenancePlanApi, type MaintenancePlanItem } from '@api/maintenancePlan.api';
 import { AircraftStatusReport } from '@components/reports/AircraftStatusReport';
 
@@ -37,7 +37,20 @@ const STATUS_LABEL: Record<string, string> = {
 
 function NewAircraftModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
-  const [selectedTemplateId, setSelectedTemplateId] = useState('');
+  const PLAN_CATEGORY_LABELS: Record<AssignedPlanCategory, string> = {
+    manufacturer: 'Normativa de fabricante',
+    national_dgac: 'Normativa nacional (DGAC)',
+    engine_components: 'Componentes e inspecciones de motor',
+    origin_country: 'Normativa país de origen (EASA)',
+  };
+
+  const [selectedTemplatesByCategory, setSelectedTemplatesByCategory] = useState<Record<AssignedPlanCategory, string>>({
+    manufacturer: '',
+    national_dgac: '',
+    engine_components: '',
+    origin_country: '',
+  });
+
   const [form, setForm] = useState<CreateAircraftInput>({
     registration: '',
     manufacturer: '',
@@ -54,19 +67,111 @@ function NewAircraftModal({ onClose }: { onClose: () => void }) {
     staleTime: 5 * 60 * 1000,
   });
 
+  const activeTemplates = useMemo(
+    () => templates.filter((t) => t.isActive),
+    [templates],
+  );
+
+  const normalize = (value: string | null | undefined) => (value ?? '').trim().toUpperCase();
+
+  const scoreTemplateForCategory = (
+    category: AssignedPlanCategory,
+    template: MaintenanceTemplate,
+  ): number => {
+    const manufacturer = normalize(form.manufacturer);
+    const model = normalize(form.model);
+    const engineModel = normalize(form.engineModel ?? '');
+    const templateManufacturer = normalize(template.manufacturer);
+    const templateModel = normalize(template.model);
+    const descriptor = normalize(`${template.description ?? ''} ${template.version}`);
+    const tasks = template.tasks ?? [];
+
+    const hasDgacSignals = descriptor.includes('DGAC')
+      || descriptor.includes('RAC')
+      || tasks.some((task) => normalize(task.referenceType).includes('INTERNAL') || normalize(task.referenceNumber).includes('DGAC'));
+    const hasEngineSignals = descriptor.includes('ENGINE')
+      || descriptor.includes('MOTOR')
+      || tasks.some((task) => {
+        const taskText = normalize(`${task.title} ${task.code} ${task.applicablePartNumber ?? ''} ${task.chapter ?? ''}`);
+        return taskText.includes('ENGINE')
+          || taskText.includes('MOTOR')
+          || taskText.startsWith('72')
+          || normalize(task.applicablePartNumber).includes(engineModel);
+      });
+    const hasEasaSignals = descriptor.includes('EASA')
+      || tasks.some((task) => normalize(task.referenceNumber).includes('EASA') || normalize(task.title).includes('EASA'));
+
+    let score = 0;
+    if (templateManufacturer === manufacturer) score += 40;
+    if (templateModel === model) score += 40;
+    if (templateModel.includes(model) || model.includes(templateModel)) score += 15;
+    if (engineModel && normalize(`${template.description ?? ''} ${template.model}`).includes(engineModel)) score += 20;
+
+    if (category === 'manufacturer') {
+      if (templateManufacturer === manufacturer && templateModel === model) score += 120;
+      if (!hasDgacSignals && !hasEngineSignals && !hasEasaSignals) score += 25;
+    }
+    if (category === 'national_dgac') {
+      if (hasDgacSignals) score += 120;
+    }
+    if (category === 'engine_components') {
+      if (hasEngineSignals) score += 120;
+    }
+    if (category === 'origin_country') {
+      if (hasEasaSignals) score += 120;
+    }
+
+    return score;
+  };
+
+  const templatesByCategory = useMemo(() => {
+    const categories: AssignedPlanCategory[] = ['manufacturer', 'national_dgac', 'engine_components', 'origin_country'];
+    const grouped = {} as Record<AssignedPlanCategory, MaintenanceTemplate[]>;
+
+    for (const category of categories) {
+      grouped[category] = [...activeTemplates]
+        .map((template) => ({ template, score: scoreTemplateForCategory(category, template) }))
+        .sort((a, b) => b.score - a.score)
+        .map((entry) => entry.template);
+    }
+
+    return grouped;
+  }, [activeTemplates, form.manufacturer, form.model, form.engineModel]);
+
+  useEffect(() => {
+    if (activeTemplates.length === 0) return;
+
+    const categories: AssignedPlanCategory[] = ['manufacturer', 'national_dgac', 'engine_components', 'origin_country'];
+    setSelectedTemplatesByCategory((prev) => {
+      const next = { ...prev };
+      for (const category of categories) {
+        if (next[category]) continue;
+        const candidate = templatesByCategory[category]?.[0];
+        if (candidate) next[category] = candidate.id;
+      }
+      return next;
+    });
+  }, [activeTemplates, templatesByCategory]);
+
   const mutation = useMutation({
     mutationFn: async () => {
       const aircraft = await aircraftApi.create(form);
-      if (!selectedTemplateId) {
-        return { aircraft, tasksCloned: 0, templateApplied: false };
+
+      const assignments = (Object.entries(selectedTemplatesByCategory) as Array<[AssignedPlanCategory, string]>)
+        .filter(([, templateId]) => Boolean(templateId))
+        .map(([category, templateId]) => ({ category, templateId }));
+
+      if (assignments.length === 0) {
+        return { aircraft, assignmentsApplied: 0, tasksCloned: 0 };
       }
 
-      const clone = await libraryApi.cloneToAircraft(selectedTemplateId, aircraft.id);
-      return { aircraft, tasksCloned: clone.tasksCloned, templateApplied: true };
+      const result = await libraryApi.assignBundleToAircraft(aircraft.id, assignments);
+      const tasksCloned = result.assignments.reduce((acc, item) => acc + (item.tasksCloned ?? 0), 0);
+      return { aircraft, assignmentsApplied: result.assignments.length, tasksCloned };
     },
-    onSuccess: ({ templateApplied, tasksCloned }) => {
-      if (templateApplied) {
-        toast.success(`Aeronave creada y plan asignado (${tasksCloned} tareas)`);
+    onSuccess: ({ assignmentsApplied, tasksCloned }) => {
+      if (assignmentsApplied > 0) {
+        toast.success(`Aeronave creada y ${assignmentsApplied} planes base asignados (${tasksCloned} tareas)`);
       } else {
         toast.success('Aeronave creada correctamente');
       }
@@ -198,22 +303,25 @@ function NewAircraftModal({ onClose }: { onClose: () => void }) {
             </div>
           </div>
 
-          <div>
-            <label className="form-label">Plan de Mantenimiento (Biblioteca)</label>
-            <select
-              value={selectedTemplateId}
-              onChange={e => setSelectedTemplateId(e.target.value)}
-              className="filter-input w-full"
-            >
-              <option value="">Sin asignar por ahora</option>
-              {templates
-                .filter(t => t.isActive)
-                .map(t => (
-                  <option key={t.id} value={t.id}>
-                    {t.manufacturer} {t.model} - {t.description ?? t.version}
-                  </option>
-                ))}
-            </select>
+          <div className="space-y-3">
+            <p className="form-label">Planes base por categoría</p>
+            {(['manufacturer', 'national_dgac', 'engine_components', 'origin_country'] as AssignedPlanCategory[]).map((category) => (
+              <div key={category}>
+                <label className="form-label">{PLAN_CATEGORY_LABELS[category]}</label>
+                <select
+                  value={selectedTemplatesByCategory[category]}
+                  onChange={(e) => setSelectedTemplatesByCategory((prev) => ({ ...prev, [category]: e.target.value }))}
+                  className="filter-input w-full"
+                >
+                  <option value="">Sin asignar por ahora</option>
+                  {(templatesByCategory[category] ?? []).map((template) => (
+                    <option key={template.id} value={template.id}>
+                      {template.manufacturer} {template.model} - {template.description ?? template.version}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
           </div>
 
           <div className="flex justify-end gap-2 pt-2">
