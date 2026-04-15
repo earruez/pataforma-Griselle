@@ -46,6 +46,13 @@ type ExecutionContext = {
   officeOrderId: string;
 };
 
+type TaskExecutionType = 'maintenance' | 'component_replacement';
+
+type TaskExecutionModel = {
+  executionType: TaskExecutionType;
+  requiresComponentTracking: boolean;
+};
+
 type CriticalBy = 'hours' | 'cycles' | 'calendar' | 'none';
 
 function renderMetricPills(
@@ -249,6 +256,7 @@ function RegisterComponentExecutionModal({
   onMovement: (movement: ComponentMovement) => void;
   onApplication: (application: ComponentApplication) => void;
 }) {
+  const isReplacementFlow = mode === 'component_replacement';
   const [componentId, setComponentId] = useState(existingComponents[0]?.id ?? '');
   const [position, setPosition] = useState(existingComponents[0]?.position ?? '');
   const [newPartNumber, setNewPartNumber] = useState('');
@@ -278,19 +286,25 @@ function RegisterComponentExecutionModal({
 
   const mutation = useMutation({
     mutationFn: async () => {
-      if (!hasComponents) throw new Error('No hay componentes asociados todavía');
       const iso = new Date(performedAt).toISOString();
       const parsedHours = Number(hours);
       const parsedCycles = Number(cycles);
       if (Number.isNaN(new Date(iso).getTime())) throw new Error('Fecha/hora inválida');
       if (!Number.isFinite(parsedHours) || parsedHours < 0) throw new Error('Horas aeronave inválidas');
       if (!Number.isFinite(parsedCycles) || parsedCycles < 0) throw new Error('Ciclos aeronave inválidos');
-      if (!position.trim()) throw new Error('Posición obligatoria');
       if (!workOrderNumber.trim()) throw new Error('N° OT obligatorio');
 
-      let targetComponentId = componentId;
+      if (isReplacementFlow && !hasComponents) {
+        throw new Error('No hay componentes asociados todavía');
+      }
 
-      if (mode === 'component_replacement') {
+      if (isReplacementFlow && !position.trim()) {
+        throw new Error('Posición obligatoria');
+      }
+
+      let targetComponentId: string | null = isReplacementFlow ? componentId : null;
+
+      if (isReplacementFlow) {
         if (!newPartNumber.trim() || !newSerialNumber.trim()) {
           throw new Error('P/N y S/N nuevos son obligatorios');
         }
@@ -346,7 +360,7 @@ function RegisterComponentExecutionModal({
         });
       }
 
-      if (!targetComponentId) throw new Error('Selecciona un componente');
+      if (isReplacementFlow && !targetComponentId) throw new Error('Selecciona un componente');
 
       await complianceApi.record({
         aircraftId,
@@ -361,23 +375,25 @@ function RegisterComponentExecutionModal({
         notes: notes.trim() || null,
       });
 
-      onApplication({
-        id: `app-${Date.now()}`,
-        componentInstanceId: targetComponentId,
-        taskId: task.taskId,
-        aircraftId,
-        workRequestId: context.workRequestId,
-        officeOrderId: context.officeOrderId,
-        workOrderNumber: workOrderNumber.trim(),
-        appliedAt: iso,
-        aircraftHoursAtApplication: parsedHours,
-        aircraftCyclesAtApplication: parsedCycles,
-        nextDueHours: duePreview.nextDueHours,
-        nextDueCycles: duePreview.nextDueCycles,
-        nextDueDate: duePreview.nextDueDate,
-        notes: notes.trim() || null,
-        createdAt: new Date().toISOString(),
-      });
+      if (targetComponentId) {
+        onApplication({
+          id: `app-${Date.now()}`,
+          componentInstanceId: targetComponentId,
+          taskId: task.taskId,
+          aircraftId,
+          workRequestId: context.workRequestId,
+          officeOrderId: context.officeOrderId,
+          workOrderNumber: workOrderNumber.trim(),
+          appliedAt: iso,
+          aircraftHoursAtApplication: parsedHours,
+          aircraftCyclesAtApplication: parsedCycles,
+          nextDueHours: duePreview.nextDueHours,
+          nextDueCycles: duePreview.nextDueCycles,
+          nextDueDate: duePreview.nextDueDate,
+          notes: notes.trim() || null,
+          createdAt: new Date().toISOString(),
+        });
+      }
     },
     onSuccess: () => {
       toast.success(
@@ -408,29 +424,35 @@ function RegisterComponentExecutionModal({
         </div>
 
         <div className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
-          <div className="rounded-lg border border-slate-200 bg-white p-4">
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Componente asociado</p>
-            {!hasComponents ? (
-              <div className="mt-2 flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5">
-                <p className="text-sm text-slate-600">No hay componentes asociados todavía</p>
-                <button type="button" className="btn-secondary btn-xs" onClick={onCreateComponent}>+ Crear componente</button>
-              </div>
-            ) : (
-              <div className="mt-2">
-                <label className="form-label">Componente <span className="text-rose-500">*</span></label>
-                <select className="filter-input w-full" value={componentId} onChange={(e) => setComponentId(e.target.value)}>
-                  <option value="">Seleccionar componente</option>
-                  {existingComponents.map((c) => (
-                    <option key={c.id} value={c.id}>{c.partNumber} / {c.serialNumber} - {c.description}</option>
-                  ))}
-                </select>
-              </div>
-            )}
-          </div>
+          {isReplacementFlow ? (
+            <div className="rounded-lg border border-slate-200 bg-white p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Componente asociado</p>
+              {!hasComponents ? (
+                <div className="mt-2 flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5">
+                  <p className="text-sm text-slate-600">No hay componentes asociados todavía</p>
+                  <button type="button" className="btn-secondary btn-xs" onClick={onCreateComponent}>+ Crear componente</button>
+                </div>
+              ) : (
+                <div className="mt-2">
+                  <label className="form-label">Componente <span className="text-rose-500">*</span></label>
+                  <select className="filter-input w-full" value={componentId} onChange={(e) => setComponentId(e.target.value)}>
+                    <option value="">Seleccionar componente</option>
+                    {existingComponents.map((c) => (
+                      <option key={c.id} value={c.id}>{c.partNumber} / {c.serialNumber} - {c.description}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="rounded-lg border border-slate-200 bg-white p-4">
+              <p className="text-sm text-slate-600">Esta tarea es de mantenimiento y no requiere componente (P/N y S/N).</p>
+            </div>
+          )}
 
           <div className="rounded-lg border border-slate-200 bg-white p-4">
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Datos del registro</p>
-            {mode === 'component_replacement' && (
+            {isReplacementFlow && (
               <div className="grid grid-cols-2 gap-4 mt-2">
                 <div>
                   <label className="form-label">P/N nuevo <span className="text-rose-500">*</span></label>
@@ -447,10 +469,12 @@ function RegisterComponentExecutionModal({
                 <label className="form-label">Fecha/hora <span className="text-rose-500">*</span></label>
                 <input type="datetime-local" value={performedAt} onChange={(e) => setPerformedAt(e.target.value)} className="filter-input w-full" />
               </div>
-              <div>
-                <label className="form-label">Posición <span className="text-rose-500">*</span></label>
-                <input value={position} onChange={(e) => setPosition(e.target.value)} className="filter-input w-full" />
-              </div>
+              {isReplacementFlow && (
+                <div>
+                  <label className="form-label">Posición <span className="text-rose-500">*</span></label>
+                  <input value={position} onChange={(e) => setPosition(e.target.value)} className="filter-input w-full" />
+                </div>
+              )}
               <div>
                 <label className="form-label">Horas aeronave <span className="text-rose-500">*</span></label>
                 <input type="number" min={0} step="0.1" value={hours} onChange={(e) => setHours(e.target.value)} className="filter-input w-full" />
@@ -484,7 +508,7 @@ function RegisterComponentExecutionModal({
 
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-slate-200">
           <button type="button" className="btn-secondary" onClick={onClose}>Cancelar</button>
-          <button type="button" className="btn-primary" onClick={() => mutation.mutate()} disabled={mutation.isPending || !hasComponents}>
+          <button type="button" className="btn-primary" onClick={() => mutation.mutate()} disabled={mutation.isPending || (isReplacementFlow && !hasComponents)}>
             {mutation.isPending ? 'Guardando…' : 'Guardar'}
           </button>
         </div>
@@ -596,6 +620,19 @@ export default function ComponentsPage() {
 
   const componentChapterTasks = planItems.filter((item) => templateComponentCodes.has(item.taskCode) || isComponentTaskCode(item.taskCode));
 
+  const taskExecutionModelByTaskId = useMemo(() => {
+    const map = new Map<string, TaskExecutionModel>();
+
+    for (const task of componentChapterTasks) {
+      map.set(task.taskId, {
+        executionType: task.executionType,
+        requiresComponentTracking: task.requiresComponentTracking,
+      });
+    }
+
+    return map;
+  }, [componentChapterTasks]);
+
   const filteredComponentChapterTasks = useMemo(() => {
     const q = componentTaskSearch.trim().toLowerCase();
     if (!q) return componentChapterTasks;
@@ -695,11 +732,12 @@ export default function ComponentsPage() {
         ataCode: task.taskCode,
         name: task.taskTitle,
         description: task.taskTitle,
+        executionType: taskExecutionModelByTaskId.get(task.taskId)?.executionType ?? 'maintenance',
         intervalType: resolveIntervalType(task),
         intervalHours: task.intervalHours,
         intervalCycles: task.intervalCycles,
         intervalDays,
-        requiresComponentTracking: true,
+        requiresComponentTracking: taskExecutionModelByTaskId.get(task.taskId)?.requiresComponentTracking ?? false,
         sourceGroup: 'MAINTENANCE_PLAN',
         reference: task.referenceNumber ?? null,
         createdAt: now,
@@ -708,7 +746,7 @@ export default function ComponentsPage() {
     }
 
     return map;
-  }, [componentChapterTasks]);
+  }, [componentChapterTasks, taskExecutionModelByTaskId]);
 
   const workRequestRefById = useMemo(() => {
     const map = new Map<string, string>();
@@ -769,11 +807,12 @@ export default function ComponentsPage() {
       ataCode: 'N/A',
       name: c.description,
       description: c.description,
+      executionType: 'maintenance',
       intervalType: fallbackIntervalType,
       intervalHours: c.tboHours ?? null,
       intervalCycles: c.tboCycles ?? null,
       intervalDays: null,
-      requiresComponentTracking: true,
+      requiresComponentTracking: false,
       sourceGroup: 'COMPONENTS_PAGE',
       reference: null,
       createdAt: new Date().toISOString(),
@@ -1014,6 +1053,11 @@ export default function ComponentsPage() {
       return;
     }
 
+    const taskModel = taskExecutionModelByTaskId.get(item.taskId) ?? {
+      executionType: 'maintenance',
+      requiresComponentTracking: false,
+    };
+
     const stId = await createSTFromSource('maintenance_plan', {
       aircraftId: selectedAircraft,
       sourceId: item.taskId,
@@ -1023,6 +1067,9 @@ export default function ComponentsPage() {
       aircraftHoursAtRequest: selectedAircraftData?.totalFlightHours ?? 0,
       aircraftCyclesAtRequest: selectedAircraftData?.totalCycles ?? 0,
       priority: 'media',
+      requiresComponentTracking: taskModel.requiresComponentTracking,
+      executionType: taskModel.executionType === 'component_replacement' ? 'component_replacement' : 'maintenance_application',
+      componentDefinitionId: item.componentDefinitionId ?? undefined,
     });
 
     const stRef = getWorkRequestRef(stId);
@@ -1182,7 +1229,7 @@ export default function ComponentsPage() {
             {!isLoading && installedComponents.length === 0 && <tr><td colSpan={13} className="table-cell text-center text-slate-400 py-12">No hay componentes instalados actualmente</td></tr>}
             {installedComponents.map((c: ComponentRow) => {
               const flow = componentFlowById.get(c.id) ?? { openOrDraftSt: null, validSt: null };
-              const applicationTask = filteredComponentChapterTasks.find((row) => getExecutionContextForTask(row, 'maintenance_application', c.id)) ?? null;
+              const applicationTask = filteredComponentChapterTasks.find((row) => getExecutionContextForTask(row, 'maintenance_application')) ?? null;
               const replacementTask = filteredComponentChapterTasks.find((row) => getExecutionContextForTask(row, 'component_replacement', c.id)) ?? null;
               const showExecutionActions = Boolean(flow.validSt);
               const { due, latestApplication, traceTask } = buildDueContextForComponent(c);
@@ -1396,12 +1443,17 @@ export default function ComponentsPage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filteredComponentChapterTasks.map((item) => {
+                const taskModel = taskExecutionModelByTaskId.get(item.taskId) ?? {
+                  executionType: 'maintenance',
+                  requiresComponentTracking: false,
+                };
                 const appContext = getExecutionContextForTask(item, 'maintenance_application');
                 const replacementContext = getExecutionContextForTask(item, 'component_replacement');
                 const openSt = openOrDraftSTByTaskId.get(item.taskId) ?? null;
                 const associatedComponent = currentComponentByTaskId.get(item.taskId) ?? null;
                 const hasExecutedApplication = effectiveComponentApplications.some((app) => app.taskId === item.taskId && app.aircraftId === selectedAircraft);
-                const taskVisibleState: VisibleComponentState = appContext || replacementContext
+                const contextForTask = taskModel.executionType === 'component_replacement' ? replacementContext : appContext;
+                const taskVisibleState: VisibleComponentState = contextForTask
                   ? 'OT recibida'
                   : openSt
                     ? 'En ST'
@@ -1427,14 +1479,16 @@ export default function ComponentsPage() {
                   </td>
                   <td className="table-cell text-xs">{visibleStateBadge(taskVisibleState)}</td>
                   <td className="table-cell text-xs text-slate-600">
-                    {associatedComponent
-                      ? `${associatedComponent.partNumber} / ${associatedComponent.serialNumber}`
-                      : 'Sin componente asociado'}
+                    {taskModel.requiresComponentTracking
+                      ? associatedComponent
+                        ? `${associatedComponent.partNumber} / ${associatedComponent.serialNumber}`
+                        : 'Sin componente asociado'
+                      : 'No requiere componente'}
                   </td>
-                  <td className="table-cell text-xs text-slate-600">{appContext || replacementContext ? 'OT recibida/firmada' : openSt ? `En borrador ${openSt.ref}` : 'Sin solicitud'}</td>
+                  <td className="table-cell text-xs text-slate-600">{contextForTask ? 'OT recibida/firmada' : openSt ? `En borrador ${openSt.ref}` : 'Sin solicitud'}</td>
                   <td className="table-cell text-center">
                     <div className="flex items-center justify-center gap-1.5">
-                      {!appContext && !replacementContext && !openSt && (
+                      {!contextForTask && !openSt && (
                         <button
                           className="btn-primary btn-xs"
                           onClick={() => handleInlineAddTaskToST(item)}
@@ -1442,7 +1496,7 @@ export default function ComponentsPage() {
                           Agregar a ST
                         </button>
                       )}
-                      {!appContext && !replacementContext && openSt && (
+                      {!contextForTask && openSt && (
                         <button
                           className="btn-secondary btn-xs"
                           onClick={() => handleInlineViewST(openSt.id)}
@@ -1450,12 +1504,12 @@ export default function ComponentsPage() {
                           Ver ST
                         </button>
                       )}
-                      {appContext && (
+                      {taskModel.executionType === 'maintenance' && appContext && (
                         <button className="btn-secondary btn-xs" onClick={() => openExecutionFlow(item, 'maintenance_application')}>
                           Registrar aplicación
                         </button>
                       )}
-                      {replacementContext && (
+                      {taskModel.executionType === 'component_replacement' && replacementContext && (
                         <button className="btn-primary btn-xs" onClick={() => openExecutionFlow(item, 'component_replacement')}>
                           Registrar cambio ejecutado
                         </button>

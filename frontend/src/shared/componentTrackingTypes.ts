@@ -1,4 +1,5 @@
 export type ComponentIntervalType = 'hours' | 'cycles' | 'calendar' | 'mixed';
+export type ComponentExecutionType = 'maintenance' | 'component_replacement';
 
 export interface ComponentDefinition {
   id: string;
@@ -6,6 +7,7 @@ export interface ComponentDefinition {
   ataCode: string;
   name: string;
   description: string;
+  executionType: ComponentExecutionType;
   intervalType: ComponentIntervalType;
   intervalHours: number | null;
   intervalCycles: number | null;

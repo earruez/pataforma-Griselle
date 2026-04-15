@@ -18,6 +18,9 @@ export async function createSTFromSource(
     aircraftHoursAtRequest: number;
     aircraftCyclesAtRequest: number;
     priority?: 'alta' | 'media' | 'baja';
+    requiresComponentTracking?: boolean;
+    executionType?: 'maintenance_application' | 'component_replacement' | 'discrepancy_action';
+    componentDefinitionId?: string;
   }
 ): Promise<string> {
   const store = useWorkRequestStore.getState();
@@ -40,6 +43,9 @@ export async function createSTFromSource(
     aircraftCyclesAtRequest: sourceData.aircraftCyclesAtRequest,
     referenceCode: sourceData.ataCode || 'N/A',
     regulatoryBasis: 'Generada desde origen',
+    requiresComponentTracking: sourceData.requiresComponentTracking,
+    executionType: sourceData.executionType,
+    componentDefinitionId: sourceData.componentDefinitionId,
   });
 
   return draft.id;

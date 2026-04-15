@@ -3,11 +3,15 @@ import { PaginatedResult, PaginationOptions } from './shared';
 
 export type PlanItemStatus = 'OVERDUE' | 'DUE_SOON' | 'OK' | 'NEVER_PERFORMED';
 export type DueByType = 'HOURS' | 'CALENDAR';
+export type MaintenanceExecutionType = 'maintenance' | 'component_replacement';
 
 export interface MaintenancePlanItem {
   taskId: string;
   taskCode: string;
   taskTitle: string;
+  executionType: MaintenanceExecutionType;
+  requiresComponentTracking: boolean;
+  componentDefinitionId: string | null;
   intervalType: string;
   intervalHours: number | null;
   intervalCycles: number | null;

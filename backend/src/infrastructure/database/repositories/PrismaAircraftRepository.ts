@@ -61,7 +61,15 @@ export class PrismaAircraftRepository implements IAircraftRepository {
     const links = await prisma.aircraftTask.findMany({
       where: { aircraftId, isActive: true },
       include: {
-        task: true,
+        task: {
+          include: {
+            componentLinks: {
+              where: { isActive: true },
+              select: { componentId: true },
+              take: 1,
+            },
+          },
+        },
         aircraft: { select: { totalFlightHours: true, totalCycles: true } },
       },
     });
@@ -107,6 +115,13 @@ export class PrismaAircraftRepository implements IAircraftRepository {
     }
 
     return links.map(({ task }) => {
+      const requiresComponentTracking =
+        task.componentLinks.length > 0
+        || Boolean(task.applicablePartNumber);
+      const executionType: MaintenancePlanItem['executionType'] = requiresComponentTracking
+        ? 'component_replacement'
+        : 'maintenance';
+
       const comp = compByTask.get(task.id);
       const complianceNotes = (comp?.notes as string | null) ?? null;
       const evidenceMatch = complianceNotes?.match(/Evidencia\s([^|]+)/i);
@@ -183,6 +198,9 @@ export class PrismaAircraftRepository implements IAircraftRepository {
         taskId:              task.id,
         taskCode:            task.code,
         taskTitle:           task.title,
+        executionType,
+        requiresComponentTracking,
+        componentDefinitionId: requiresComponentTracking ? task.id : null,
         intervalType:        task.intervalType,
         intervalHours:       task.intervalHours != null ? Number(task.intervalHours) : null,
         intervalCycles:      task.intervalCycles,
