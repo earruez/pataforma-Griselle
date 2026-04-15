@@ -2,7 +2,7 @@ import { type ReactNode, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'react-hot-toast';
-import { componentApi, type CreateComponentInput } from '@api/component.api';
+import { componentApi, type ComponentComplianceRecord, type CreateComponentInput } from '@api/component.api';
 import { aircraftApi } from '@api/aircraft.api';
 import { maintenancePlanApi } from '@api/maintenancePlan.api';
 import type { MaintenancePlanItem } from '@api/maintenancePlan.api';
@@ -31,8 +31,11 @@ interface ComponentRow {
   manufacturer: string | null;
   position: string | null;
   tboHours: number | null;
+  tboCycles: number | null;
   hoursSinceOverhaul: number | null;
+  cyclesSinceOverhaul: number | null;
   totalHoursSinceNew: number | null;
+  totalCyclesSinceNew: number | null;
   installationDate: string | null;
   aircraftId: string | null;
 }
@@ -517,6 +520,46 @@ export default function ComponentsPage() {
     queryFn: () => (selectedAircraft ? componentApi.findByAircraft(selectedAircraft) : componentApi.findAll()),
   });
 
+  const { data: bulkComponentApplications = [] } = useQuery({
+    queryKey: ['component-applications-bulk', selectedAircraft, components.map((c) => c.id).join(',')],
+    queryFn: async () => {
+      const rows = components as ComponentRow[];
+      const historyByComponent = await Promise.all(
+        rows.map(async (component) => {
+          const history = await componentApi.getComplianceHistory(component.id);
+          return { component, history };
+        }),
+      );
+
+      const mapped: ComponentApplication[] = [];
+      for (const { component, history } of historyByComponent) {
+        for (const record of history as ComponentComplianceRecord[]) {
+          mapped.push({
+            id: `api-${record.id}`,
+            componentInstanceId: component.id,
+            taskId: record.task.id,
+            aircraftId: component.aircraftId ?? selectedAircraft,
+            workRequestId: '',
+            officeOrderId: '',
+            workOrderNumber: record.workOrderNumber ?? '',
+            appliedAt: record.performedAt,
+            aircraftHoursAtApplication: record.aircraftHoursAtCompliance,
+            aircraftCyclesAtApplication: record.aircraftCyclesAtCompliance,
+            nextDueHours: record.nextDueHours,
+            nextDueCycles: record.nextDueCycles,
+            nextDueDate: record.nextDueDate,
+            notes: record.notes,
+            createdAt: record.performedAt,
+          });
+        }
+      }
+
+      return mapped;
+    },
+    enabled: Boolean(selectedAircraft) && components.length > 0,
+    staleTime: 0,
+  });
+
   const { data: componentHistory = [], isLoading: loadingComponentHistory } = useQuery({
     queryKey: ['component-compliance-history', expandedComponentId],
     queryFn: () => componentApi.getComplianceHistory(expandedComponentId!),
@@ -580,21 +623,41 @@ export default function ComponentsPage() {
     [filteredComponents, removedComponentIds],
   );
 
+  const effectiveComponentApplications = useMemo(() => {
+    const byKey = new Map<string, ComponentApplication>();
+
+    for (const app of bulkComponentApplications) {
+      if (selectedAircraft && app.aircraftId !== selectedAircraft) continue;
+      const key = `${app.componentInstanceId}::${app.taskId}::${app.appliedAt}`;
+      byKey.set(key, app);
+    }
+
+    for (const app of componentApplications) {
+      if (selectedAircraft && app.aircraftId !== selectedAircraft) continue;
+      const key = `${app.componentInstanceId}::${app.taskId}::${app.appliedAt}`;
+      byKey.set(key, app);
+    }
+
+    return Array.from(byKey.values()).sort(
+      (a, b) => new Date(b.appliedAt).getTime() - new Date(a.appliedAt).getTime(),
+    );
+  }, [bulkComponentApplications, componentApplications, selectedAircraft]);
+
   const latestApplicationByComponentId = useMemo(() => {
     const map = new Map<string, ComponentApplication>();
-    for (const app of componentApplications) {
+    for (const app of effectiveComponentApplications) {
       const existing = map.get(app.componentInstanceId);
       if (!existing || new Date(app.appliedAt).getTime() > new Date(existing.appliedAt).getTime()) {
         map.set(app.componentInstanceId, app);
       }
     }
     return map;
-  }, [componentApplications]);
+  }, [effectiveComponentApplications]);
 
   const currentComponentByTaskId = useMemo(() => {
     const map = new Map<string, ComponentRow>();
 
-    const sortedApps = [...componentApplications].sort(
+    const sortedApps = [...effectiveComponentApplications].sort(
       (a, b) => new Date(b.appliedAt).getTime() - new Date(a.appliedAt).getTime(),
     );
 
@@ -608,13 +671,44 @@ export default function ComponentsPage() {
     }
 
     return map;
-  }, [componentApplications, componentById, selectedAircraft]);
+  }, [effectiveComponentApplications, componentById, selectedAircraft]);
 
   const taskById = useMemo(() => {
     const map = new Map<string, MaintenancePlanItem>();
     for (const t of planItems) map.set(t.taskId, t);
     return map;
   }, [planItems]);
+
+  const componentDefinitionByTaskId = useMemo(() => {
+    const map = new Map<string, ComponentDefinition>();
+    const now = new Date().toISOString();
+
+    for (const task of componentChapterTasks) {
+      const intervalDays = task.intervalCalendarDays != null
+        ? task.intervalCalendarDays
+        : task.intervalCalendarMonths != null
+          ? task.intervalCalendarMonths * 30
+          : null;
+      map.set(task.taskId, {
+        id: task.taskId,
+        ataChapter: task.taskCode.split('-')[0] ?? 'N/A',
+        ataCode: task.taskCode,
+        name: task.taskTitle,
+        description: task.taskTitle,
+        intervalType: resolveIntervalType(task),
+        intervalHours: task.intervalHours,
+        intervalCycles: task.intervalCycles,
+        intervalDays,
+        requiresComponentTracking: true,
+        sourceGroup: 'MAINTENANCE_PLAN',
+        reference: task.referenceNumber ?? null,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    return map;
+  }, [componentChapterTasks]);
 
   const workRequestRefById = useMemo(() => {
     const map = new Map<string, string>();
@@ -624,6 +718,9 @@ export default function ComponentsPage() {
 
   const buildDueContextForComponent = (c: ComponentRow) => {
     const latestApplication = latestApplicationByComponentId.get(c.id) ?? null;
+    const linkedDefinition = latestApplication
+      ? componentDefinitionByTaskId.get(latestApplication.taskId) ?? null
+      : null;
     const traceTask = latestApplication
       ? taskById.get(latestApplication.taskId) ?? null
       : null;
@@ -635,8 +732,12 @@ export default function ComponentsPage() {
     };
 
     const fallbackAppliedHours = snapshot.currentHours - (c.hoursSinceOverhaul ?? c.totalHoursSinceNew ?? 0);
+    const fallbackAppliedCycles = snapshot.currentCycles - (c.cyclesSinceOverhaul ?? c.totalCyclesSinceNew ?? 0);
     const fallbackRemainingHours = c.tboHours != null && c.hoursSinceOverhaul != null
       ? c.tboHours - c.hoursSinceOverhaul
+      : null;
+    const fallbackRemainingCycles = c.tboCycles != null && c.cyclesSinceOverhaul != null
+      ? c.tboCycles - c.cyclesSinceOverhaul
       : null;
     const syntheticApplication: ComponentApplication = latestApplication ?? {
       id: `synthetic-${c.id}`,
@@ -648,29 +749,33 @@ export default function ComponentsPage() {
       workOrderNumber: '',
       appliedAt: c.installationDate ?? new Date().toISOString(),
       aircraftHoursAtApplication: Number.isFinite(fallbackAppliedHours) ? fallbackAppliedHours : 0,
-      aircraftCyclesAtApplication: snapshot.currentCycles,
+      aircraftCyclesAtApplication: Number.isFinite(fallbackAppliedCycles) ? fallbackAppliedCycles : 0,
       nextDueHours: fallbackRemainingHours != null ? snapshot.currentHours + fallbackRemainingHours : null,
-      nextDueCycles: null,
+      nextDueCycles: fallbackRemainingCycles != null ? snapshot.currentCycles + fallbackRemainingCycles : null,
       nextDueDate: null,
       notes: null,
       createdAt: new Date().toISOString(),
     };
 
-    const inferredAta = traceTask?.taskCode ?? latestApplication?.taskId ?? c.partNumber ?? 'N/A';
+    const fallbackIntervalType: ComponentDefinition['intervalType'] = c.tboHours != null && c.tboCycles != null
+      ? 'mixed'
+      : c.tboCycles != null
+        ? 'cycles'
+        : 'hours';
 
-    const definition: ComponentDefinition = {
+    const definition: ComponentDefinition = linkedDefinition ?? {
       id: `def-${c.id}`,
-      ataChapter: inferredAta.split('-')[0] ?? 'N/A',
-      ataCode: inferredAta,
-      name: traceTask?.taskTitle ?? c.description,
-      description: traceTask?.taskTitle ?? c.description,
-      intervalType: traceTask ? resolveIntervalType(traceTask) : 'hours',
-      intervalHours: traceTask?.intervalHours ?? c.tboHours ?? null,
-      intervalCycles: traceTask?.intervalCycles ?? null,
-      intervalDays: traceTask?.intervalCalendarDays ?? (traceTask?.intervalCalendarMonths != null ? traceTask.intervalCalendarMonths * 30 : null),
+      ataChapter: 'N/A',
+      ataCode: 'N/A',
+      name: c.description,
+      description: c.description,
+      intervalType: fallbackIntervalType,
+      intervalHours: c.tboHours ?? null,
+      intervalCycles: c.tboCycles ?? null,
+      intervalDays: null,
       requiresComponentTracking: true,
       sourceGroup: 'COMPONENTS_PAGE',
-      reference: traceTask?.referenceNumber ?? null,
+      reference: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -713,7 +818,7 @@ export default function ComponentsPage() {
       });
     }
 
-    for (const app of componentApplications.filter((x) => x.componentInstanceId === componentId)) {
+    for (const app of effectiveComponentApplications.filter((x) => x.componentInstanceId === componentId)) {
       const task = taskById.get(app.taskId);
       events.push({
         id: `app-${app.id}`,
@@ -801,7 +906,7 @@ export default function ComponentsPage() {
     }
 
     return Array.from(unique.values()).sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime());
-  }, [selectedTimelineComponent, componentApplications, componentMovements, componentHistory, componentById, taskById, workRequestRefById]);
+  }, [selectedTimelineComponent, effectiveComponentApplications, componentMovements, componentHistory, componentById, taskById, workRequestRefById]);
 
   const isValidSTForExecution = (wrStatus: WorkRequestStatus, hasOtEvidence: boolean) => {
     const eligibleStatuses = new Set<WorkRequestStatus>([
@@ -824,7 +929,7 @@ export default function ComponentsPage() {
   };
 
   const hasExecutionForComponentInWorkRequest = (componentId: string, workRequestId: string) => {
-    const hasApplication = componentApplications.some(
+    const hasApplication = effectiveComponentApplications.some(
       (app) => app.workRequestId === workRequestId && app.componentInstanceId === componentId,
     );
 
@@ -859,7 +964,7 @@ export default function ComponentsPage() {
       }
     }
     return map;
-  }, [workRequests, selectedAircraft, componentApplications, componentMovements]);
+  }, [workRequests, selectedAircraft, effectiveComponentApplications, componentMovements]);
 
   const openOrDraftSTByTaskId = useMemo(() => {
     const map = new Map<string, { id: string; ref: string }>();
@@ -1295,7 +1400,7 @@ export default function ComponentsPage() {
                 const replacementContext = getExecutionContextForTask(item, 'component_replacement');
                 const openSt = openOrDraftSTByTaskId.get(item.taskId) ?? null;
                 const associatedComponent = currentComponentByTaskId.get(item.taskId) ?? null;
-                const hasExecutedApplication = componentApplications.some((app) => app.taskId === item.taskId && app.aircraftId === selectedAircraft);
+                const hasExecutedApplication = effectiveComponentApplications.some((app) => app.taskId === item.taskId && app.aircraftId === selectedAircraft);
                 const taskVisibleState: VisibleComponentState = appContext || replacementContext
                   ? 'OT recibida'
                   : openSt
@@ -1424,7 +1529,7 @@ export default function ComponentsPage() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {componentApplications.map((row) => (
+            {effectiveComponentApplications.map((row) => (
               <tr key={row.id}>
                 <td className="table-cell text-xs text-slate-600">{new Date(row.appliedAt).toLocaleString('es-MX')}</td>
                 <td className="table-cell text-xs text-slate-700">{row.taskId}</td>
