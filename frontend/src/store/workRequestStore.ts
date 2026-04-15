@@ -51,6 +51,9 @@ interface WorkRequestStoreState {
     referenceCode?: string;
     regulatoryBasis?: string;
     itemStatus?: WorkRequestItemStatus;
+    requiresComponentTracking?: boolean;
+    executionType?: 'maintenance_application' | 'component_replacement' | 'discrepancy_action';
+    componentDefinitionId?: string;
   }) => WorkRequestItem | null;
   removeItemFromWorkRequest: (workRequestId: string, itemId: string) => void;
   sendWorkRequest: (workRequestId: string) => void;
@@ -138,6 +141,9 @@ export const useWorkRequestStore = create<WorkRequestStoreState>((set, get) => (
       title: item.title,
       description: item.description,
       regulatoryBasis: item.regulatoryBasis ?? 'Pendiente',
+      requiresComponentTracking: item.requiresComponentTracking ?? false,
+      executionType: item.executionType ?? 'maintenance_application',
+      componentDefinitionId: item.componentDefinitionId,
       priority: item.priority,
       aircraftHoursAtRequest: item.aircraftHoursAtRequest,
       aircraftCyclesAtRequest: item.aircraftCyclesAtRequest,

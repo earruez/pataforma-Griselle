@@ -12,6 +12,11 @@ export enum WorkRequestStatus {
   REJECTED = 'rejected',
 }
 
+export type WorkRequestExecutionType =
+  | 'maintenance_application'
+  | 'component_replacement'
+  | 'discrepancy_action';
+
 export enum WorkRequestItemStatus {
   PENDING = 'pending',
   SENT = 'sent',
@@ -68,6 +73,11 @@ export interface WorkRequestItem {
   title: string;
   description: string;
   regulatoryBasis: string;
+  requiresComponentTracking?: boolean;
+  executionType?: WorkRequestExecutionType;
+  componentDefinitionId?: string;
+  installedComponentInstanceId?: string;
+  removedComponentInstanceId?: string;
   priority: 'alta' | 'media' | 'baja';
   observation?: string;
   aircraftHoursAtRequest: number;
@@ -173,7 +183,7 @@ export interface OfficeOrder {
   id: string;
   workRequestId: string;
   otNumber: string;
-  status: string;
+  status: 'issued' | 'received' | 'signed' | 'closed';
   issuedAt: string;
   signedAt?: string;
   signedFileUrl?: string;

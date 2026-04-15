@@ -1,0 +1,41 @@
+import type { ComponentMovement, ComponentApplication } from './componentTrackingTypes';
+
+export const mockComponentMovements: ComponentMovement[] = [
+  {
+    id: 'mov-001',
+    aircraftId: 'acft-001',
+    position: 'ENGINE 1',
+    movementType: 'replacement',
+    removedComponentInstanceId: 'cmp-inst-101',
+    installedComponentInstanceId: 'cmp-inst-201',
+    workRequestId: 'st-ot-001',
+    officeOrderId: 'ot-001',
+    workOrderNumber: 'OT-2026-011',
+    performedAt: '2026-04-12T15:20:00.000Z',
+    aircraftHoursAtMovement: 2154.2,
+    aircraftCyclesAtMovement: 1302,
+    notes: 'Cambio por consumo de limite de horas.',
+    createdAt: '2026-04-12T16:00:00.000Z',
+    performedByUserName: 'TMA Principal',
+  },
+];
+
+export const mockComponentApplications: ComponentApplication[] = [
+  {
+    id: 'app-001',
+    componentInstanceId: 'cmp-inst-201',
+    taskId: 'task-001',
+    aircraftId: 'acft-001',
+    workRequestId: 'st-ot-001',
+    officeOrderId: 'ot-001',
+    workOrderNumber: 'OT-2026-011',
+    appliedAt: '2026-04-12T15:20:00.000Z',
+    aircraftHoursAtApplication: 2154.2,
+    aircraftCyclesAtApplication: 1302,
+    nextDueHours: 2354.2,
+    nextDueCycles: null,
+    nextDueDate: null,
+    notes: 'Aplicacion posterior a cambio de componente.',
+    createdAt: '2026-04-12T16:00:00.000Z',
+  },
+];
