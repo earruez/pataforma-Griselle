@@ -1,6 +1,6 @@
 import { type ReactNode, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'react-hot-toast';
 import { componentApi, type CreateComponentInput } from '@api/component.api';
 import { aircraftApi } from '@api/aircraft.api';
@@ -492,6 +492,7 @@ function RegisterComponentExecutionModal({
 
 export default function ComponentsPage() {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [showModal, setShowModal] = useState(false);
   const [executionDraft, setExecutionDraft] = useState<{
     mode: WorkRequestExecutionType;
@@ -822,6 +823,20 @@ export default function ComponentsPage() {
     return openStatuses.has(wrStatus);
   };
 
+  const hasExecutionForComponentInWorkRequest = (componentId: string, workRequestId: string) => {
+    const hasApplication = componentApplications.some(
+      (app) => app.workRequestId === workRequestId && app.componentInstanceId === componentId,
+    );
+
+    const hasMovement = componentMovements.some((movement) => {
+      if (movement.workRequestId !== workRequestId) return false;
+      return movement.removedComponentInstanceId === componentId
+        || movement.installedComponentInstanceId === componentId;
+    });
+
+    return hasApplication || hasMovement;
+  };
+
   const componentFlowById = useMemo(() => {
     const map = new Map<string, {
       openOrDraftSt: { id: string; ref: string } | null;
@@ -837,13 +852,14 @@ export default function ComponentsPage() {
       for (const item of wr.items) {
         if (item.sourceKind !== 'component_inspection' || !item.sourceId) continue;
         const existing = map.get(item.sourceId) ?? { openOrDraftSt: null, validSt: null };
-        if (isValid) existing.validSt = existing.validSt ?? { id: wr.id, ref: wr.folio };
+        const alreadyExecuted = hasExecutionForComponentInWorkRequest(item.sourceId, wr.id);
+        if (isValid && !alreadyExecuted) existing.validSt = existing.validSt ?? { id: wr.id, ref: wr.folio };
         if (!isValid && isOpen) existing.openOrDraftSt = existing.openOrDraftSt ?? { id: wr.id, ref: wr.folio };
         map.set(item.sourceId, existing);
       }
     }
     return map;
-  }, [workRequests, selectedAircraft]);
+  }, [workRequests, selectedAircraft, componentApplications, componentMovements]);
 
   const openOrDraftSTByTaskId = useMemo(() => {
     const map = new Map<string, { id: string; ref: string }>();
@@ -910,9 +926,18 @@ export default function ComponentsPage() {
   };
 
   const handleInlineViewST = (stId: string) => {
+    const exists = workRequests.some((wr) => wr.id === stId);
+    if (!exists) {
+      toast.error('No se encontro la ST asociada');
+      return;
+    }
     const stRef = getWorkRequestRef(stId);
     selectWorkRequest(stId, 'general');
-    toast.success(`ST seleccionada: ${stRef}`);
+    const query = selectedAircraft
+      ? `/work-requests?aircraftId=${selectedAircraft}&stId=${stId}`
+      : `/work-requests?stId=${stId}`;
+    navigate(query);
+    toast.success(`Abriendo ${stRef}`);
   };
 
   const replacementIntervalLabel = (item: MaintenancePlanItem) => {
