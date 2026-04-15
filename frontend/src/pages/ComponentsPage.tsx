@@ -241,6 +241,7 @@ function RegisterComponentExecutionModal({
   aircraftHours,
   aircraftCycles,
   existingComponents,
+  existingApplications,
   onClose,
   onSaved,
   onCreateComponent,
@@ -254,6 +255,7 @@ function RegisterComponentExecutionModal({
   aircraftHours: number;
   aircraftCycles: number;
   existingComponents: ComponentRow[];
+  existingApplications: ComponentApplication[];
   onClose: () => void;
   onSaved: () => void;
   onCreateComponent: () => void;
@@ -273,6 +275,34 @@ function RegisterComponentExecutionModal({
 
   const selectedComponent = existingComponents.find((c) => c.id === componentId) ?? null;
   const hasComponents = existingComponents.length > 0;
+
+  const deriveInstalledHours = (component: ComponentRow): number | null => {
+    const consumedHours = component.hoursSinceOverhaul ?? component.totalHoursSinceNew;
+    if (consumedHours == null || !Number.isFinite(aircraftHours)) return null;
+    const baseline = aircraftHours - consumedHours;
+    return Number.isFinite(baseline) ? baseline : null;
+  };
+
+  const deriveInstalledCycles = (component: ComponentRow): number | null => {
+    const consumedCycles = component.cyclesSinceOverhaul ?? component.totalCyclesSinceNew;
+    if (consumedCycles == null || !Number.isFinite(aircraftCycles)) return null;
+    const baseline = aircraftCycles - consumedCycles;
+    return Number.isFinite(baseline) ? baseline : null;
+  };
+
+  const latestApplicationForComponentTask = (componentInstanceId: string, taskId: string): ComponentApplication | null => {
+    const matches = existingApplications.filter(
+      (app) => app.componentInstanceId === componentInstanceId && app.taskId === taskId,
+    );
+    if (matches.length === 0) return null;
+    return matches.sort((a, b) => new Date(b.appliedAt).getTime() - new Date(a.appliedAt).getTime())[0] ?? null;
+  };
+
+  const latestApplicationForComponent = (componentInstanceId: string): ComponentApplication | null => {
+    const matches = existingApplications.filter((app) => app.componentInstanceId === componentInstanceId);
+    if (matches.length === 0) return null;
+    return matches.sort((a, b) => new Date(b.appliedAt).getTime() - new Date(a.appliedAt).getTime())[0] ?? null;
+  };
 
   const duePreview = useMemo(() => {
     return calculateNextDue({
@@ -304,6 +334,47 @@ function RegisterComponentExecutionModal({
 
       if (isReplacementFlow && !position.trim()) {
         throw new Error('Posición obligatoria');
+      }
+
+      if (selectedComponent) {
+        const installedAtHours = deriveInstalledHours(selectedComponent);
+        const installedAtCycles = deriveInstalledCycles(selectedComponent);
+        const installedAtDate = selectedComponent.installationDate ? new Date(selectedComponent.installationDate) : null;
+
+        const lastSameTask = latestApplicationForComponentTask(selectedComponent.id, task.taskId);
+        const lastForComponent = latestApplicationForComponent(selectedComponent.id);
+
+        if (lastSameTask && parsedHours < lastSameTask.aircraftHoursAtApplication) {
+          throw new Error('Las horas no pueden ser menores al último registro del componente.');
+        }
+        if (lastSameTask && parsedCycles < lastSameTask.aircraftCyclesAtApplication) {
+          throw new Error('Los ciclos no pueden ser menores al último cumplimiento registrado.');
+        }
+        if (lastSameTask && new Date(iso).getTime() < new Date(lastSameTask.appliedAt).getTime()) {
+          throw new Error('La fecha no puede ser anterior al último cumplimiento registrado.');
+        }
+
+        if (installedAtHours != null && parsedHours < installedAtHours) {
+          throw new Error('Las horas no pueden ser menores a la instalación actual del componente.');
+        }
+        if (installedAtCycles != null && parsedCycles < installedAtCycles) {
+          throw new Error('Los ciclos no pueden ser menores a la instalación actual del componente.');
+        }
+        if (installedAtDate && new Date(iso).getTime() < installedAtDate.getTime()) {
+          throw new Error('La fecha no puede ser anterior a la instalación actual.');
+        }
+
+        if (isReplacementFlow && lastForComponent) {
+          if (parsedHours < lastForComponent.aircraftHoursAtApplication) {
+            throw new Error('Las horas no pueden ser menores al último registro del componente.');
+          }
+          if (parsedCycles < lastForComponent.aircraftCyclesAtApplication) {
+            throw new Error('Los ciclos no pueden ser menores al último cumplimiento registrado.');
+          }
+          if (new Date(iso).getTime() < new Date(lastForComponent.appliedAt).getTime()) {
+            throw new Error('La fecha no puede ser anterior al último cumplimiento registrado.');
+          }
+        }
       }
 
       let targetComponentId: string | null = isReplacementFlow ? componentId : null;
@@ -867,6 +938,9 @@ export default function ComponentsPage() {
 
     for (const app of effectiveComponentApplications.filter((x) => x.componentInstanceId === componentId)) {
       const task = taskById.get(app.taskId);
+      const appHours = Number(app.aircraftHoursAtApplication);
+      const appCycles = Number(app.aircraftCyclesAtApplication);
+      const appNextDueHours = app.nextDueHours != null ? Number(app.nextDueHours) : null;
       events.push({
         id: `app-${app.id}`,
         type: 'application',
@@ -874,9 +948,9 @@ export default function ComponentsPage() {
         title: 'Aplicación registrada',
         details: [
           `Tarea ATA: ${task?.taskCode ?? app.taskId}`,
-          `Horas/Ciclos: ${app.aircraftHoursAtApplication.toFixed(1)} / ${app.aircraftCyclesAtApplication}`,
+          `Horas/Ciclos: ${Number.isFinite(appHours) ? appHours.toFixed(1) : '0.0'} / ${Number.isFinite(appCycles) ? Math.round(appCycles) : 0}`,
           `Próximo: ${[
-            app.nextDueHours != null ? `${app.nextDueHours.toFixed(0)} FH` : null,
+            appNextDueHours != null && Number.isFinite(appNextDueHours) ? `${appNextDueHours.toFixed(0)} FH` : null,
             app.nextDueCycles != null ? `${app.nextDueCycles} CYC` : null,
             app.nextDueDate ? new Date(app.nextDueDate).toLocaleDateString('es-MX') : null,
           ].filter(Boolean).join(' · ') || '—'}`,
@@ -887,16 +961,19 @@ export default function ComponentsPage() {
     }
 
     for (const h of componentHistory) {
+      const historyHours = Number(h.aircraftHoursAtCompliance);
+      const historyCycles = Number(h.aircraftCyclesAtCompliance);
+      const historyNextDueHours = h.nextDueHours != null ? Number(h.nextDueHours) : null;
       events.push({
         id: `api-app-${h.id}`,
         type: 'application',
         occurredAt: h.performedAt,
         title: 'Aplicación registrada',
         details: [
-          `Tarea ATA: ${h.task.code}`,
-          `Horas/Ciclos: ${h.aircraftHoursAtCompliance.toFixed(1)} / ${h.aircraftCyclesAtCompliance}`,
+          `Tarea ATA: ${h.task?.code ?? 'N/A'}`,
+          `Horas/Ciclos: ${Number.isFinite(historyHours) ? historyHours.toFixed(1) : '0.0'} / ${Number.isFinite(historyCycles) ? Math.round(historyCycles) : 0}`,
           `Próximo: ${[
-            h.nextDueHours != null ? `${h.nextDueHours.toFixed(0)} FH` : null,
+            historyNextDueHours != null && Number.isFinite(historyNextDueHours) ? `${historyNextDueHours.toFixed(0)} FH` : null,
             h.nextDueCycles != null ? `${h.nextDueCycles} CYC` : null,
             h.nextDueDate ? new Date(h.nextDueDate).toLocaleDateString('es-MX') : null,
           ].filter(Boolean).join(' · ') || '—'}`,
@@ -909,6 +986,8 @@ export default function ComponentsPage() {
     for (const move of componentMovements) {
       const touchesComponent = move.installedComponentInstanceId === componentId || move.removedComponentInstanceId === componentId;
       if (!touchesComponent) continue;
+      const movementHours = Number(move.aircraftHoursAtMovement);
+      const movementCycles = Number(move.aircraftCyclesAtMovement);
 
       if (move.movementType === 'replacement') {
         events.push({
@@ -920,7 +999,7 @@ export default function ComponentsPage() {
             `Saliente: ${move.removedPartNumber ?? (move.removedComponentInstanceId ? componentById.get(move.removedComponentInstanceId)?.partNumber ?? '—' : '—')} / ${move.removedSerialNumber ?? (move.removedComponentInstanceId ? componentById.get(move.removedComponentInstanceId)?.serialNumber ?? '—' : '—')}`,
             `Entrante: ${move.installedPartNumber ?? (move.installedComponentInstanceId ? componentById.get(move.installedComponentInstanceId)?.partNumber ?? '—' : '—')} / ${move.installedSerialNumber ?? (move.installedComponentInstanceId ? componentById.get(move.installedComponentInstanceId)?.serialNumber ?? '—' : '—')}`,
             `Posición: ${move.position}`,
-            `Horas/Ciclos: ${move.aircraftHoursAtMovement.toFixed(1)} / ${move.aircraftCyclesAtMovement}`,
+            `Horas/Ciclos: ${Number.isFinite(movementHours) ? movementHours.toFixed(1) : '0.0'} / ${Number.isFinite(movementCycles) ? Math.round(movementCycles) : 0}`,
           ],
           stRef: workRequestRefById.get(move.workRequestId) ?? move.workRequestId,
           otRef: move.workOrderNumber,
@@ -938,7 +1017,7 @@ export default function ComponentsPage() {
             `P/N: ${move.removedPartNumber ?? componentById.get(componentId)?.partNumber ?? '—'}`,
             `S/N: ${move.removedSerialNumber ?? componentById.get(componentId)?.serialNumber ?? '—'}`,
             `Posición: ${move.position}`,
-            `Horas/Ciclos: ${move.aircraftHoursAtMovement.toFixed(1)} / ${move.aircraftCyclesAtMovement}`,
+            `Horas/Ciclos: ${Number.isFinite(movementHours) ? movementHours.toFixed(1) : '0.0'} / ${Number.isFinite(movementCycles) ? Math.round(movementCycles) : 0}`,
           ],
           stRef: workRequestRefById.get(move.workRequestId) ?? move.workRequestId,
           otRef: move.workOrderNumber,
@@ -1623,6 +1702,7 @@ export default function ComponentsPage() {
           aircraftHours={selectedAircraftData.totalFlightHours}
           aircraftCycles={selectedAircraftData.totalCycles}
           existingComponents={installedComponents as ComponentRow[]}
+          existingApplications={effectiveComponentApplications.filter((app) => app.aircraftId === selectedAircraftData.id)}
           onClose={() => setExecutionDraft(null)}
           onCreateComponent={() => {
             setExecutionDraft(null);
