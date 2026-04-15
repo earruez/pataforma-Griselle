@@ -11,7 +11,7 @@ import type { TaskDefinition, CreateTaskInput } from '@api/tasks.api';
 import { complianceApi } from '@api/compliance.api';
 import type { RecordComplianceInput } from '@api/compliance.api';
 import { useWorkRequestStore } from '../store/workRequestStore';
-import { isActiveWorkRequestStatus } from '@/shared/workRequestTypes';
+import { isActiveWorkRequestStatus, WorkRequestStatus } from '@/shared/workRequestTypes';
 import {
   ClipboardCheck, AlertTriangle, Clock, CheckCircle2,
   ChevronRight, Search, BookOpen, Calendar, Gauge, RefreshCw,
@@ -852,7 +852,7 @@ function getOperationalStatusClass(status: string): string {
 interface TaskRowProps {
   item: MaintenancePlanItem;
   priority: SmartPriority;
-  inlineST?: { id: string; folio: string };
+  workflow: { state: 'none' | 'open' | 'valid'; stId?: string; stRef?: string };
   selected: boolean;
   selectable: boolean;
   onToggleSelect: (item: MaintenancePlanItem, checked: boolean) => void;
@@ -866,7 +866,7 @@ interface TaskRowProps {
 function TaskRow({
   item,
   priority,
-  inlineST,
+  workflow,
   selected,
   selectable,
   onToggleSelect,
@@ -880,8 +880,8 @@ function TaskRow({
   const visualMeta = VISUAL_META[priority.visual];
   const maintenanceType = classifyMaintenanceType(item);
   const typeMeta = MAINTENANCE_TYPE_META[maintenanceType];
-  const resolvedStId = inlineST?.id ?? item.inWorkRequestId ?? null;
-  const resolvedStRef = inlineST?.folio ?? item.inWorkRequestNumber ?? resolvedStId;
+  const resolvedStId = workflow.stId ?? item.inWorkRequestId ?? null;
+  const resolvedStRef = workflow.stRef ?? item.inWorkRequestNumber ?? resolvedStId;
   const hasST = Boolean(resolvedStId);
 
   const intervalLabel = () => {
@@ -978,12 +978,25 @@ function TaskRow({
       <td className="px-4 py-3.5 whitespace-nowrap">
         {hasST ? (
           <div className="flex items-center gap-2">
-            <span className="text-[11px] font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
-              {inlineST ? `En borrador ${resolvedStRef}` : `ST ${resolvedStRef}`}
-            </span>
-            <button className="btn-secondary btn-xs" onClick={() => onViewST(item, resolvedStId ?? undefined)}>
-              Ver ST
-            </button>
+              {workflow.state === 'open' ? (
+                <>
+                  <span className="text-[11px] font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
+                    ST abierta/borrador {resolvedStRef}
+                  </span>
+                  <button className="btn-secondary btn-xs" onClick={() => onViewST(item, resolvedStId ?? undefined)}>
+                    Ver ST
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+                    ST válida con OT {resolvedStRef}
+                  </span>
+                  <button className="btn-secondary btn-xs" onClick={() => onViewST(item, resolvedStId ?? undefined)}>
+                    Ver ST
+                  </button>
+                </>
+              )}
           </div>
         ) : (
           <button className="btn-primary btn-xs" onClick={() => onGenerateST(item)}>
@@ -993,7 +1006,12 @@ function TaskRow({
       </td>
       <td className="px-4 py-3.5 whitespace-nowrap">
         <div className="flex items-center gap-1.5">
-          <button title="Registrar cumplimiento" onClick={() => onRecord(item)} className="btn-secondary btn-xs">
+          <button
+            title={workflow.state === 'valid' ? 'Registrar cumplimiento' : 'Requiere ST válida con OT recibida/firmada'}
+            onClick={() => workflow.state === 'valid' && onRecord(item)}
+            className="btn-secondary btn-xs"
+            disabled={workflow.state !== 'valid'}
+          >
             Registrar
           </button>
           <button title="Editar tarea" onClick={() => onEdit(item)} className="btn-xs btn-outline">
@@ -1130,7 +1148,73 @@ export default function MaintenancePlanPage() {
   }, [selectedId]);
 
   const resolveInlineSt = (item: MaintenancePlanItem) => inlineStByTaskId[item.taskId];
-  const isItemInRequest = (item: MaintenancePlanItem) => Boolean(item.inWorkRequestId || item.inWorkRequestNumber || resolveInlineSt(item));
+
+  const taskWorkflowByTaskId = useMemo(() => {
+    const map = new Map<string, { state: 'none' | 'open' | 'valid'; stId?: string; stRef?: string }>();
+    if (!selectedId) return map;
+
+    const validStatuses = new Set<WorkRequestStatus>([
+      WorkRequestStatus.SIGNED_OT_RECEIVED,
+      WorkRequestStatus.REGULARIZED,
+      WorkRequestStatus.CLOSED,
+    ]);
+
+    const openStatuses = new Set<WorkRequestStatus>([
+      WorkRequestStatus.DRAFT,
+      WorkRequestStatus.SENT,
+      WorkRequestStatus.IN_REVIEW,
+      WorkRequestStatus.OBSERVED,
+      WorkRequestStatus.APPROVED,
+    ]);
+
+    for (const wr of workRequests) {
+      if (wr.aircraftId !== selectedId) continue;
+      const hasOtEvidence = Boolean(wr.otReference && (wr.otReceivedAt || wr.returnedSignedOtUrl || wr.status === WorkRequestStatus.SIGNED_OT_RECEIVED));
+      const state: 'open' | 'valid' | null = validStatuses.has(wr.status) && hasOtEvidence
+        ? 'valid'
+        : openStatuses.has(wr.status)
+          ? 'open'
+          : null;
+
+      if (!state) continue;
+
+      for (const wrItem of wr.items) {
+        if (wrItem.sourceKind !== 'maintenance_plan' || !wrItem.sourceId) continue;
+        const existing = map.get(wrItem.sourceId);
+        if (!existing || (existing.state !== 'valid' && state === 'valid')) {
+          map.set(wrItem.sourceId, { state, stId: wr.id, stRef: wr.folio });
+        }
+      }
+    }
+
+    for (const [taskId, st] of Object.entries(inlineStByTaskId)) {
+      if (!map.has(taskId)) {
+        map.set(taskId, { state: 'open', stId: st.id, stRef: st.folio });
+      }
+    }
+
+    return map;
+  }, [workRequests, selectedId, inlineStByTaskId]);
+
+  const resolveTaskWorkflow = (item: MaintenancePlanItem) => {
+    const fromMap = taskWorkflowByTaskId.get(item.taskId);
+    if (fromMap) return fromMap;
+
+    const inline = resolveInlineSt(item);
+    if (inline) return { state: 'open' as const, stId: inline.id, stRef: inline.folio };
+
+    if (item.inWorkRequestId || item.inWorkRequestNumber) {
+      return {
+        state: 'open' as const,
+        stId: item.inWorkRequestId ?? undefined,
+        stRef: item.inWorkRequestNumber ?? item.inWorkRequestId ?? undefined,
+      };
+    }
+
+    return { state: 'none' as const };
+  };
+
+  const isItemInRequest = (item: MaintenancePlanItem) => resolveTaskWorkflow(item).state !== 'none';
 
   const priorityContext = useMemo(
     () => ({ currentHours: selectedAircraft?.totalFlightHours ?? null, today: new Date() }),
@@ -1840,7 +1924,7 @@ export default function MaintenancePlanPage() {
                       key={item.taskId}
                       item={item}
                       priority={smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item, priorityContext)}
-                      inlineST={resolveInlineSt(item)}
+                      workflow={resolveTaskWorkflow(item)}
                       selected={selectedTaskIds.includes(item.taskId)}
                       selectable={!isItemInRequest(item)}
                       onToggleSelect={handleToggleTaskSelection}
