@@ -306,7 +306,10 @@ function RegisterComponentExecutionModal({
           manufacturer: selectedComponent?.manufacturer ?? 'OT EXEC',
           aircraftId,
           position: position.trim(),
-        });
+          // These fields are sent for forward compatibility if backend supports instance metadata.
+          definitionId: task.taskId,
+          status: 'installed',
+        } as CreateComponentInput & { definitionId: string; status: 'installed' });
 
         await componentApi.updateInstallation(created.id, {
           aircraftId,
@@ -587,6 +590,25 @@ export default function ComponentsPage() {
     return map;
   }, [componentApplications]);
 
+  const currentComponentByTaskId = useMemo(() => {
+    const map = new Map<string, ComponentRow>();
+
+    const sortedApps = [...componentApplications].sort(
+      (a, b) => new Date(b.appliedAt).getTime() - new Date(a.appliedAt).getTime(),
+    );
+
+    for (const app of sortedApps) {
+      if (app.aircraftId !== selectedAircraft) continue;
+      if (map.has(app.taskId)) continue;
+      const comp = componentById.get(app.componentInstanceId);
+      if (!comp) continue;
+      if ((comp.position ?? '').toUpperCase().startsWith('REMOVED')) continue;
+      map.set(app.taskId, comp);
+    }
+
+    return map;
+  }, [componentApplications, componentById, selectedAircraft]);
+
   const taskById = useMemo(() => {
     const map = new Map<string, MaintenancePlanItem>();
     for (const t of planItems) map.set(t.taskId, t);
@@ -612,6 +634,9 @@ export default function ComponentsPage() {
     };
 
     const fallbackAppliedHours = snapshot.currentHours - (c.hoursSinceOverhaul ?? c.totalHoursSinceNew ?? 0);
+    const fallbackRemainingHours = c.tboHours != null && c.hoursSinceOverhaul != null
+      ? c.tboHours - c.hoursSinceOverhaul
+      : null;
     const syntheticApplication: ComponentApplication = latestApplication ?? {
       id: `synthetic-${c.id}`,
       componentInstanceId: c.id,
@@ -623,17 +648,19 @@ export default function ComponentsPage() {
       appliedAt: c.installationDate ?? new Date().toISOString(),
       aircraftHoursAtApplication: Number.isFinite(fallbackAppliedHours) ? fallbackAppliedHours : 0,
       aircraftCyclesAtApplication: snapshot.currentCycles,
-      nextDueHours: null,
+      nextDueHours: fallbackRemainingHours != null ? snapshot.currentHours + fallbackRemainingHours : null,
       nextDueCycles: null,
       nextDueDate: null,
       notes: null,
       createdAt: new Date().toISOString(),
     };
 
+    const inferredAta = traceTask?.taskCode ?? latestApplication?.taskId ?? c.partNumber ?? 'N/A';
+
     const definition: ComponentDefinition = {
       id: `def-${c.id}`,
-      ataChapter: traceTask?.taskCode?.split('-')[0] ?? 'N/A',
-      ataCode: traceTask?.taskCode ?? 'N/A',
+      ataChapter: inferredAta.split('-')[0] ?? 'N/A',
+      ataCode: inferredAta,
       name: traceTask?.taskTitle ?? c.description,
       description: traceTask?.taskTitle ?? c.description,
       intervalType: traceTask ? resolveIntervalType(traceTask) : 'hours',
@@ -1242,6 +1269,7 @@ export default function ComponentsPage() {
                 const appContext = getExecutionContextForTask(item, 'maintenance_application');
                 const replacementContext = getExecutionContextForTask(item, 'component_replacement');
                 const openSt = openOrDraftSTByTaskId.get(item.taskId) ?? null;
+                const associatedComponent = currentComponentByTaskId.get(item.taskId) ?? null;
                 const hasExecutedApplication = componentApplications.some((app) => app.taskId === item.taskId && app.aircraftId === selectedAircraft);
                 const taskVisibleState: VisibleComponentState = appContext || replacementContext
                   ? 'OT recibida'
@@ -1268,7 +1296,11 @@ export default function ComponentsPage() {
                     ].filter(Boolean).join(' / ') || '—'}
                   </td>
                   <td className="table-cell text-xs">{visibleStateBadge(taskVisibleState)}</td>
-                  <td className="table-cell text-xs text-slate-600">{isComponentTaskCode(item.taskCode) ? 'Requiere componente' : 'Aplicación'}</td>
+                  <td className="table-cell text-xs text-slate-600">
+                    {associatedComponent
+                      ? `${associatedComponent.partNumber} / ${associatedComponent.serialNumber}`
+                      : 'Sin componente asociado'}
+                  </td>
                   <td className="table-cell text-xs text-slate-600">{appContext || replacementContext ? 'OT recibida/firmada' : openSt ? `En borrador ${openSt.ref}` : 'Sin solicitud'}</td>
                   <td className="table-cell text-center">
                     <div className="flex items-center justify-center gap-1.5">

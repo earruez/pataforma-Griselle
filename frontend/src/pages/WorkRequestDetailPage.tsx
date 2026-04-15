@@ -211,7 +211,7 @@ export default function WorkRequestDetailPage() {
   };
 
   // Determinar si la ST ya tiene OT cargada
-  const hasOT = Boolean(workRequest?.otReference && workRequest?.returnedSignedOtUrl);
+  const hasOT = Boolean(workRequest?.otReference && workRequest?.otReceivedAt);
 
   // Handler para guardar datos de OT
   const handleRegisterOT = (data: { otNumber: string; receivedAt: string; file?: File | null; notes: string }) => {
@@ -227,14 +227,15 @@ export default function WorkRequestDetailPage() {
       otReceivedAt: data.receivedAt,
       otNotes: data.notes,
       updatedAt: new Date().toISOString(),
-      status: WorkRequestStatus.IN_REVIEW, // Mantener en proceso pero con OT cargada
+      // Al registrar OT, la ST pasa a estado operativo de cierre visible.
+      status: WorkRequestStatus.SIGNED_OT_RECEIVED,
       statusHistory: [
         ...workRequest.statusHistory,
         {
           id: `hist-${Math.random().toString(36).slice(2, 9)}`,
           workRequestId: workRequest.id,
           fromStatus: workRequest.status,
-          toStatus: WorkRequestStatus.IN_REVIEW,
+          toStatus: WorkRequestStatus.SIGNED_OT_RECEIVED,
           changedByUserId: 'user-001',
           changedAt: new Date().toISOString(),
           comment: `Se registró OT recibida: ${data.otNumber}`,
