@@ -13,6 +13,11 @@ import WorkOrderDetailPage from '@pages/WorkOrderDetailPage';
 import ReportsPage from '@pages/ReportsPage';
 import SettingsPage from '@pages/SettingsPage';
 import NotificationsPage from '@pages/NotificationsPage';
+import LibraryPage from '@pages/LibraryPage';
+import WorkRequestsPage from '@pages/WorkRequestsPage';
+import AircraftAlterationsPage from '@pages/AircraftAlterationsPage';
+import ConformitiesPage from '@pages/ConformitiesPage';
+import AircraftProfilePage from '@pages/AircraftProfilePage';
 import AppLayout from '@components/layout/AppLayout';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -45,11 +50,16 @@ export default function App() {
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/aircraft" element={<AircraftPage />} />
+          <Route path="/aircraft/:id" element={<AircraftProfilePage />} />
           <Route path="/components" element={<ComponentsPage />} />
           <Route path="/compliance" element={<CompliancePage />} />
           <Route path="/maintenance-plan" element={<MaintenancePlanPage />} />
+          <Route path="/work-requests" element={<WorkRequestsPage />} />
+          <Route path="/aircraft-alterations" element={<AircraftAlterationsPage />} />
+          <Route path="/library" element={<LibraryPage />} />
           <Route path="/work-orders" element={<WorkOrdersPage />} />
           <Route path="/work-orders/:id" element={<WorkOrderDetailPage />} />
+          <Route path="/conformities" element={<ConformitiesPage />} />
           <Route path="/reports" element={<ReportsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/notificaciones" element={<NotificationsPage />} />

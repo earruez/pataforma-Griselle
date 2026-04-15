@@ -10,6 +10,7 @@ import {
   Plane, AlertTriangle, Wrench, ChevronRight, X,
   Clock, Search, SlidersHorizontal, TrendingUp,
   CheckCircle2, ClipboardList, Activity, BarChart2,
+  LayoutGrid, List, User, Gauge,
 } from 'lucide-react';
 
 // ─── Semaphore configuration ─────────────────────────────────────────────────
@@ -153,6 +154,158 @@ function SemaphoreCard({ color, count, total }: { color: SemColor; count: number
             <div className={`h-full rounded-full transition-all duration-700 ${bar}`} style={{ width: `${pct}%` }} />
           </div>
           <p className="text-[11px] text-slate-400 mt-1">{pct}% de la flota</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Fleet card ─────────────────────────────────────────────────────────────
+const CARD_RADIUS = 36;
+const CARD_CIRC   = 2 * Math.PI * CARD_RADIUS;
+
+function FleetCard({
+  aircraft, plan, navigate,
+}: {
+  aircraft: Aircraft;
+  plan: MaintenancePlanItem[];
+  navigate: ReturnType<typeof useNavigate>;
+}) {
+  const tier     = computeFleetAlertTier(plan);
+  const nearest  = getFleetNearestTask(plan);
+
+  // Progress ring: % consumed of nearest hours-based task's interval
+  const pct = useMemo(() => {
+    const t = plan
+      .filter(i => i.hoursRemaining != null && i.intervalHours != null && (i.intervalHours as number) > 0)
+      .sort((a, b) => (a.hoursRemaining ?? Infinity) - (b.hoursRemaining ?? Infinity))[0];
+    if (!t || !t.intervalHours || t.hoursRemaining == null) return 0;
+    const consumed = (t.intervalHours as number) - t.hoursRemaining;
+    return Math.max(0, Math.min(100, (consumed / (t.intervalHours as number)) * 100));
+  }, [plan]);
+
+  const ringColor = tier === 'overdue' ? '#ef4444'
+    : tier === 'critical'  ? '#f87171'
+    : tier === 'warning'   ? '#f59e0b'
+    : '#10b981';
+
+  const offset   = CARD_CIRC * (1 - pct / 100);
+  const coaExp   = aircraft.coaExpiryDate ? new Date(aircraft.coaExpiryDate) : null;
+  const coaSoon  = coaExp && (coaExp.getTime() - Date.now()) < 30 * 864e5;
+
+  const borderCls = tier === 'overdue' || tier === 'critical'
+    ? 'border-rose-300 shadow-rose-100'
+    : tier === 'warning'
+      ? 'border-amber-200 shadow-amber-50'
+      : 'border-slate-200';
+
+  return (
+    <div
+      className={`bg-white rounded-2xl border shadow-sm hover:shadow-md transition-all duration-200 flex flex-col overflow-hidden ${borderCls}`}
+    >
+      {/* Top strip */}
+      <div className={`h-1 w-full ${
+        tier === 'overdue' || tier === 'critical' ? 'bg-rose-500' :
+        tier === 'warning'  ? 'bg-amber-400' : 'bg-emerald-400'
+      }`} />
+
+      <div className="p-5 flex flex-col gap-4 flex-1">
+        {/* Header */}
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-xl font-extrabold font-mono text-slate-900">{aircraft.registration}</span>
+              {(tier === 'overdue' || tier === 'critical') && (
+                <AlertTriangle size={14} className="text-rose-500 animate-pulse shrink-0" />
+              )}
+            </div>
+            <p className="text-xs text-slate-500 mt-0.5">{aircraft.manufacturer} · {aircraft.model}</p>
+          </div>
+          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 border ${
+            STATUS_BADGE[aircraft.status] ?? 'badge-grounded'
+          }`}>
+            {STATUS_LABEL[aircraft.status]}
+          </span>
+        </div>
+
+        {/* Ring + stats */}
+        <div className="flex items-center gap-4">
+          {/* SVG Ring */}
+          <div className="relative shrink-0" style={{ width: 88, height: 88 }}>
+            <svg width={88} height={88} style={{ transform: 'rotate(-90deg)' }}>
+              <circle r={CARD_RADIUS} cx={44} cy={44} fill="none" stroke="#e2e8f0" strokeWidth={7} />
+              <circle
+                r={CARD_RADIUS} cx={44} cy={44}
+                fill="none"
+                stroke={ringColor}
+                strokeWidth={7}
+                strokeDasharray={`${CARD_CIRC} ${CARD_CIRC}`}
+                strokeDashoffset={offset}
+                strokeLinecap="round"
+                style={{ transition: 'stroke-dashoffset 0.8s ease' }}
+              />
+            </svg>
+            <div className="absolute inset-0 flex flex-col items-center justify-center">
+              <span className="text-sm font-extrabold tabular-nums text-slate-900 leading-none">
+                {Number(aircraft.totalFlightHours).toFixed(0)}
+              </span>
+              <span className="text-[9px] text-slate-400 mt-0.5">h TSN</span>
+            </div>
+          </div>
+
+          {/* Side stats */}
+          <div className="flex-1 min-w-0 space-y-1.5">
+            <div className="flex items-center gap-1.5">
+              <Gauge size={11} className="text-slate-400 shrink-0" />
+              <span className="text-[11px] text-slate-500">
+                {aircraft.totalCycles.toLocaleString('es-MX')} ciclos
+              </span>
+            </div>
+            {coaExp && (
+              <div className={`flex items-center gap-1.5 ${ coaSoon ? 'text-rose-500' : 'text-slate-500' }`}>
+                <Clock size={11} className="shrink-0" />
+                <span className="text-[11px]">
+                  CdN: {coaExp.toLocaleDateString('es-MX')}
+                </span>
+              </div>
+            )}
+            {nearest && (
+              <div className={`flex items-start gap-1.5 ${tier !== 'ok' ? 'text-amber-600' : 'text-slate-500'}`}>
+                <AlertTriangle size={11} className="shrink-0 mt-0.5" />
+                <span className="text-[11px] leading-tight">
+                  <span className="font-mono font-bold">{nearest.taskCode}</span>
+                  {' '}·{' '}
+                  {nearest.hoursRemaining != null
+                    ? `${nearest.hoursRemaining.toFixed(0)}h rest.`
+                    : nearest.daysRemaining != null
+                      ? `${nearest.daysRemaining}d cal.`
+                      : '—'}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* CTA buttons */}
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={() => navigate(`/aircraft/${aircraft.id}`)}
+            className="flex-1 btn-secondary text-xs flex items-center justify-center gap-1"
+          >
+            <User size={11} />
+            Ver Ficha
+          </button>
+          <button
+            onClick={() => navigate(`/work-requests?aircraftId=${aircraft.id}`)}
+            className={`flex-1 text-xs flex items-center justify-center gap-1 rounded-lg px-3 py-1.5 font-semibold transition-all ${
+              tier === 'overdue' || tier === 'critical'
+                ? 'bg-rose-600 hover:bg-rose-700 text-white animate-pulse shadow-sm'
+                : 'btn-primary'
+            }`}
+          >
+            <ClipboardList size={11} />
+            Generar ST
+          </button>
         </div>
       </div>
     </div>
@@ -596,6 +749,7 @@ function WorkloadKPI({
 export default function DashboardPage() {
   const navigate = useNavigate();
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [viewMode, setViewMode]       = useState<'table' | 'cards'>('table');
   const [filterOwner, setFilterOwner] = useState('');
   const [filterModel, setFilterModel] = useState('');
   const [search, setSearch]           = useState('');
@@ -792,12 +946,60 @@ export default function DashboardPage() {
           <span className="ml-auto text-xs text-slate-400">
             {filtered.length} resultado{filtered.length !== 1 ? 's' : ''}
           </span>
+          {/* ─ View toggle ─ */}
+          <div className="flex items-center rounded-lg border border-slate-200 overflow-hidden ml-2 shrink-0">
+            <button
+              onClick={() => setViewMode('table')}
+              title="Vista de tabla"
+              className={`flex items-center gap-1 px-2.5 py-1.5 text-xs transition-colors ${
+                viewMode === 'table'
+                  ? 'bg-brand-600 text-white'
+                  : 'text-slate-500 hover:bg-slate-50'
+              }`}
+            >
+              <List size={13} />
+            </button>
+            <button
+              onClick={() => { setViewMode('cards'); setSelectedId(null); }}
+              title="Vista de tarjetas"
+              className={`flex items-center gap-1 px-2.5 py-1.5 text-xs transition-colors ${
+                viewMode === 'cards'
+                  ? 'bg-brand-600 text-white'
+                  : 'text-slate-500 hover:bg-slate-50'
+              }`}
+            >
+              <LayoutGrid size={13} />
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* ── Table + Side panel ── */}
+      {/* ── Table + Side panel / Fleet Cards ── */}
       <div id="fleet-table" className="flex flex-1 px-8 pb-8 gap-5 min-h-[400px]">
+        {/* ─ Cards grid ─ */}
+        {viewMode === 'cards' && (
+          <div className="w-full">
+            {filtered.length === 0 ? (
+              <div className="py-16 text-center text-sm text-slate-400">
+                {hasFilters ? 'No hay aeronaves que coincidan con los filtros' : 'No hay aeronaves registradas'}
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                {filtered.map(a => (
+                  <FleetCard
+                    key={a.id}
+                    aircraft={a}
+                    plan={planMap[a.id] ?? []}
+                    navigate={navigate}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Data table */}
+        {viewMode === 'table' && (
         <div className={`bg-white rounded-xl shadow-sm overflow-hidden flex flex-col transition-all duration-300 ${selectedAircraft ? 'flex-1 min-w-0' : 'w-full'}`}>
           <div className="overflow-auto flex-1">
             <table className="min-w-full text-sm">
@@ -906,9 +1108,10 @@ export default function DashboardPage() {
             </table>
           </div>
         </div>
+        )}
 
         {/* Task breakdown panel */}
-        {selectedAircraft && (
+        {viewMode === 'table' && selectedAircraft && (
           <div className="w-80 shrink-0 bg-white rounded-xl shadow-card overflow-hidden flex flex-col border border-slate-200 animate-in slide-in-from-right-4 duration-200">
             <TaskPanel aircraft={selectedAircraft} onClose={() => setSelectedId(null)} />
           </div>

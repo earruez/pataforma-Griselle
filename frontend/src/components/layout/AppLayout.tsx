@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useAuthStore } from '@store/authStore';
 import {
   Plane, Wrench, LayoutDashboard, LogOut, Settings,
-  ClipboardList, BarChart2, Package, ChevronRight, ClipboardCheck, Bell,
+  ClipboardList, BarChart2, Package, ChevronRight, ClipboardCheck, Bell, FileText, FileCheck2, Repeat, BookOpen,
 } from 'lucide-react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
@@ -11,16 +11,35 @@ import { maintenancePlanApi, type MaintenancePlanItem } from '@api/maintenancePl
 import { workOrdersApi } from '@api/workOrders.api';
 import { generarAlertas, TIPO_CONFIG, type Notificacion } from '@pages/NotificationsPage';
 
-const NAV = [
-  { to: '/dashboard',        label: 'Dashboard',           icon: LayoutDashboard },
-  { to: '/aircraft',         label: 'Aeronaves',            icon: Plane },
-  { to: '/components',       label: 'Componentes',          icon: Package },
-  { to: '/compliance',       label: 'Cumplimientos',        icon: Wrench },
-  { to: '/maintenance-plan', label: 'Plan de Mantenimiento',icon: ClipboardCheck },
-  { to: '/work-orders',      label: 'Órdenes de Trabajo',   icon: ClipboardList },
-  { to: '/reports',          label: 'Reportes',             icon: BarChart2 },
-  { to: '/notificaciones',   label: 'Notificaciones',        icon: Bell },
-  { to: '/settings',         label: 'Configuración',        icon: Settings },
+const NAV_SECTIONS = [
+  {
+    title: 'Control de Mantenimiento',
+    items: [
+      { to: '/aircraft', label: 'Aeronaves', icon: Plane },
+      { to: '/components', label: 'Componentes', icon: Package },
+      { to: '/compliance', label: 'Cumplimientos', icon: Wrench },
+      { to: '/maintenance-plan', label: 'Plan de Mantenimiento', icon: ClipboardCheck },
+      { to: '/library', label: 'Biblioteca de Mantenimiento', icon: BookOpen },
+      { to: '/work-requests', label: 'Solicitud de Trabajo', icon: FileText },
+      { to: '/aircraft-alterations', label: 'Alteraciones por Aeronave', icon: Repeat },
+    ],
+  },
+  {
+    title: 'Oficina Técnica',
+    items: [
+      { to: '/work-orders', label: 'Órdenes de Trabajo', icon: ClipboardList },
+      { to: '/conformities', label: 'Conformidades', icon: FileCheck2 },
+    ],
+  },
+  {
+    title: 'General',
+    items: [
+      { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+      { to: '/reports', label: 'Reportes', icon: BarChart2 },
+      { to: '/notificaciones', label: 'Notificaciones', icon: Bell },
+      { to: '/settings', label: 'Configuración', icon: Settings },
+    ],
+  },
 ];
 
 const PAGE_TITLES: Record<string, string> = {
@@ -29,7 +48,11 @@ const PAGE_TITLES: Record<string, string> = {
   '/components':       'Componentes',
   '/compliance':       'Cumplimientos',
   '/maintenance-plan': 'Plan de Mantenimiento',
+  '/library':          'Biblioteca de Mantenimiento',
+  '/work-requests':    'Solicitud de Trabajo',
+  '/aircraft-alterations': 'Alteraciones por Aeronave',
   '/work-orders':      'Órdenes de Trabajo',
+  '/conformities':     'Conformidades',
   '/reports':          'Reportes',
   '/notificaciones':   'Centro de Notificaciones',
   '/settings':         'Configuración',
@@ -234,33 +257,37 @@ export default function AppLayout() {
 
         {/* Nav */}
         <nav className="flex-1 px-2 py-3 space-y-px overflow-y-auto">
-          <p className="px-2.5 pt-1 pb-2 text-[9.5px] font-bold text-slate-600 uppercase tracking-[0.12em]">
-            Módulos
-          </p>
-          {NAV.map(({ to, label, icon: Icon }) => (
-            <NavLink
-              key={to}
-              to={to}
-              className={({ isActive }) =>
-                `flex items-center gap-2.5 px-2.5 py-[7px] rounded-lg text-[13px] font-medium transition-all duration-100 ${
-                  isActive
-                    ? 'bg-brand-600/12 text-brand-400 '
-                    : 'text-slate-400 hover:bg-slate-800/70 hover:text-slate-200'
-                }`
-              }
-            >
-              {({ isActive }) => (
-                <>
-                  <Icon size={14} className={isActive ? 'text-brand-400' : ''} />
-                  <span className="flex-1">{label}</span>
-                  {to === '/notificaciones' && unreadCount > 0 && (
-                    <span className="min-w-[18px] h-[18px] rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center px-1 tabular-nums">
-                      {unreadCount > 99 ? '99+' : unreadCount}
-                    </span>
+          {NAV_SECTIONS.map((section) => (
+            <div key={section.title} className="mb-3">
+              <p className="px-2.5 pt-1 pb-2 text-[9.5px] font-bold text-slate-600 uppercase tracking-[0.12em]">
+                {section.title}
+              </p>
+              {section.items.map(({ to, label, icon: Icon }) => (
+                <NavLink
+                  key={to}
+                  to={to}
+                  className={({ isActive }) =>
+                    `flex items-center gap-2.5 px-2.5 py-[7px] rounded-lg text-[13px] font-medium transition-all duration-100 ${
+                      isActive
+                        ? 'bg-brand-600/12 text-brand-400 '
+                        : 'text-slate-400 hover:bg-slate-800/70 hover:text-slate-200'
+                    }`
+                  }
+                >
+                  {({ isActive }) => (
+                    <>
+                      <Icon size={14} className={isActive ? 'text-brand-400' : ''} />
+                      <span className="flex-1">{label}</span>
+                      {to === '/notificaciones' && unreadCount > 0 && (
+                        <span className="min-w-[18px] h-[18px] rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center px-1 tabular-nums">
+                          {unreadCount > 99 ? '99+' : unreadCount}
+                        </span>
+                      )}
+                    </>
                   )}
-                </>
-              )}
-            </NavLink>
+                </NavLink>
+              ))}
+            </div>
           ))}
         </nav>
 

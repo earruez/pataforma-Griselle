@@ -1,7 +1,4 @@
 import { apiClient } from './client';
-import { MaintenanceTask } from './maintenancePlan.api';
-
-export type { MaintenanceTask };
 
 export interface CreateTaskInput {
   code: string;
@@ -11,6 +8,7 @@ export interface CreateTaskInput {
   intervalHours?: number | null;
   intervalCycles?: number | null;
   intervalCalendarDays?: number | null;
+  intervalCalendarMonths?: number | null;
   toleranceHours?: number | null;
   toleranceCycles?: number | null;
   toleranceCalendarDays?: number | null;
@@ -35,6 +33,7 @@ export interface TaskDefinition {
   intervalHours: number | null;
   intervalCycles: number | null;
   intervalCalendarDays: number | null;
+  intervalCalendarMonths: number | null;
   toleranceHours: number | null;
   toleranceCycles: number | null;
   toleranceCalendarDays: number | null;

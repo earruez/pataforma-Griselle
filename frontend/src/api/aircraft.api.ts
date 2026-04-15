@@ -28,6 +28,20 @@ export interface CreateAircraftInput {
   engineModel?: string | null;
 }
 
+export interface AircraftAuditEntry {
+  id: string;
+  entityType: string;
+  entityId: string;
+  action: string;
+  previousValue: Record<string, unknown> | null;
+  newValue: Record<string, unknown> | null;
+  userId: string;
+  userEmail: string;
+  userRole: string;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
 export const aircraftApi = {
   findAll: async (): Promise<Aircraft[]> => {
     const { data } = await apiClient.get('/aircraft', { params: { page: 1, limit: 100 } });
@@ -40,5 +54,11 @@ export const aircraftApi = {
   create: async (input: CreateAircraftInput): Promise<Aircraft> => {
     const { data } = await apiClient.post<{ status: string; data: Aircraft }>('/aircraft', input);
     return data.data;
+  },
+  getAuditLog: async (id: string): Promise<AircraftAuditEntry[]> => {
+    const { data } = await apiClient.get<{ status: string; data: AircraftAuditEntry[] }>(
+      `/audit-logs/aircraft/${id}`,
+    );
+    return data.data ?? [];
   },
 };

@@ -10,6 +10,18 @@ declare global {
         role: UserRole;
         organizationId: string;
       };
+      // Add user shorthand for easier access
+      user?: {
+        id: string;
+        email: string;
+        name: string;
+        role: UserRole;
+        organizationId: string;
+        isActive?: boolean;
+      };
+      // Add file for multer integration
+      file?: Express.Multer.File;
+      files?: Express.Multer.File[];
     }
   }
 }

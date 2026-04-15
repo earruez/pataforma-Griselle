@@ -31,6 +31,46 @@ export interface CreateComponentInput {
   tboCycles?: number | null;
 }
 
+export interface UpdateComponentInstallationInput {
+  aircraftId: string;
+  installationDate: string;
+  position?: string | null;
+  notes?: string | null;
+}
+
+export interface UpdateComponentInput {
+  partNumber?: string;
+  serialNumber?: string;
+  description?: string;
+  manufacturer?: string;
+  position?: string | null;
+  notes?: string | null;
+}
+
+export interface ComponentComplianceRecord {
+  id: string;
+  performedAt: string;
+  aircraftHoursAtCompliance: number;
+  aircraftCyclesAtCompliance: number;
+  nextDueHours: number | null;
+  nextDueCycles: number | null;
+  nextDueDate: string | null;
+  workOrderNumber: string | null;
+  notes: string | null;
+  status: string;
+  task: {
+    id: string;
+    code: string;
+    title: string;
+    referenceType: string;
+    referenceNumber: string | null;
+  };
+  performedBy: {
+    id: string;
+    name: string;
+  };
+}
+
 export const componentApi = {
   findByAircraft: (aircraftId: string) =>
     apiClient.get<{ status: string; data: Component[] }>(`/components/aircraft/${aircraftId}`).then((r) => r.data.data),
@@ -39,6 +79,21 @@ export const componentApi = {
 
   create: async (input: CreateComponentInput): Promise<Component> => {
     const { data } = await apiClient.post<{ status: string; data: Component }>('/components', input);
+    return data.data;
+  },
+
+  update: async (componentId: string, input: UpdateComponentInput): Promise<Component> => {
+    const { data } = await apiClient.patch<{ status: string; data: Component }>(`/components/${componentId}`, input);
+    return data.data;
+  },
+
+  updateInstallation: async (componentId: string, input: UpdateComponentInstallationInput): Promise<Component> => {
+    const { data } = await apiClient.patch<{ status: string; data: Component }>(`/components/${componentId}/installation`, input);
+    return data.data;
+  },
+
+  getComplianceHistory: async (componentId: string): Promise<ComponentComplianceRecord[]> => {
+    const { data } = await apiClient.get<{ status: string; data: ComponentComplianceRecord[] }>(`/components/${componentId}/compliances`);
     return data.data;
   },
 };

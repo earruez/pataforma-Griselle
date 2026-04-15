@@ -32,7 +32,12 @@ export interface Compliance {
 export interface RecordComplianceInput {
   aircraftId: string;
   taskId: string;
+  componentId?: string | null;
   performedAt: string;   // ISO date string
+  aircraftHoursAtCompliance?: number;
+  nextDueHours?: number | null;
+  nextDueCycles?: number | null;
+  nextDueDate?: string | null;
   workOrderNumber?: string | null;
   notes?: string | null;
 }

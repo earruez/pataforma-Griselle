@@ -2,6 +2,7 @@ import { createApp } from './app';
 import { env } from './config/env';
 import { logger } from './config/logger';
 import { connectDatabase, disconnectDatabase } from './infrastructure/database/prisma.client';
+import { startWorkRequestAutoJob, stopWorkRequestAutoJob } from './infrastructure/jobs/WorkRequestAutoJob';
 
 async function bootstrap(): Promise<void> {
   await connectDatabase();
@@ -10,9 +11,11 @@ async function bootstrap(): Promise<void> {
   const server = app.listen(env.PORT, () => {
     logger.info({ port: env.PORT, env: env.NODE_ENV }, `Griselle API listening on port ${env.PORT}`);
   });
+  startWorkRequestAutoJob();
 
   const shutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, 'Shutdown signal received');
+    stopWorkRequestAutoJob();
     server.close(async () => {
       await disconnectDatabase();
       logger.info('Server shut down gracefully');

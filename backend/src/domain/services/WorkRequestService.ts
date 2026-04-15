@@ -1,0 +1,606 @@
+import { prisma } from '../../infrastructure/database/prisma.client';
+import { PrismaAircraftRepository } from '../../infrastructure/database/repositories/PrismaAircraftRepository';
+import { AppError } from '../../shared/errors/AppError';
+import { ComplianceDueDateService } from './ComplianceDueDateService';
+import { auditLogService } from './AuditLogService';
+
+type WorkRequestItemCategory = 'MAINTENANCE_PLAN' | 'NORMATIVE' | 'COMPONENT_INSPECTION' | 'DISCREPANCY' | 'OTHER';
+
+const AMBER_DAYS = 30;
+const AMBER_HOURS = 10;
+const SUGGEST_DAYS = 90;
+const SUGGEST_HOURS = 50;
+
+export class WorkRequestService {
+  private static aircraftRepo = new PrismaAircraftRepository();
+  private static dueDateService = new ComplianceDueDateService();
+
+  private static classifyTask(task: {
+    referenceType: string;
+    applicablePartNumber: string | null;
+    requiresInspection: boolean;
+  }): WorkRequestItemCategory {
+    if (['AD', 'SB', 'CMR', 'CDCCL', 'MPD', 'ETOPS'].includes(task.referenceType)) {
+      return 'NORMATIVE';
+    }
+    if (task.applicablePartNumber || task.requiresInspection) {
+      return 'COMPONENT_INSPECTION';
+    }
+    return 'MAINTENANCE_PLAN';
+  }
+
+  private static async ensureDraft(workRequestId: string, organizationId: string) {
+    const wr = await prisma.workRequest.findFirst({ where: { id: workRequestId, organizationId } });
+    if (!wr) throw new AppError('Solicitud de Trabajo no encontrada', 404);
+    if (wr.status !== 'DRAFT') throw new AppError('Solo se puede editar una ST en borrador', 400);
+    return wr;
+  }
+
+  private static async createTaskSnapshot(taskId: string, organizationId: string) {
+    const task = await prisma.maintenanceTask.findFirst({ where: { id: taskId, organizationId } });
+    if (!task) throw new AppError('Tarea no encontrada', 404);
+    return {
+      task,
+      payload: {
+        taskId: task.id,
+        category: this.classifyTask(task),
+        itemCode: task.code,
+        itemTitle: task.title,
+        itemDescription: task.description,
+      },
+    };
+  }
+
+  private static isChapter0405(taskCode: string, referenceNumber: string | null): boolean {
+    const candidate = `${taskCode} ${referenceNumber ?? ''}`.toUpperCase();
+    return /(^|\s)(04|05)([\-./]|\s|$)/.test(candidate) || /ATA\s*(04|05)/.test(candidate);
+  }
+
+  private static async nextNumber(organizationId: string): Promise<string> {
+    const last = await prisma.workRequest.findFirst({
+      where: { organizationId },
+      orderBy: { createdAt: 'desc' },
+      select: { number: true },
+    });
+
+    const year = new Date().getFullYear();
+    const seq = last ? Number(last.number.split('-').pop() ?? '0') + 1 : 1;
+    return `ST-${year}-${String(seq).padStart(4, '0')}`;
+  }
+
+  static async getOpenDraftByAircraft(aircraftId: string, organizationId: string) {
+    return prisma.workRequest.findFirst({
+      where: { aircraftId, organizationId, status: 'DRAFT' },
+      include: { items: true },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  static async createDraft(input: {
+    aircraftId: string;
+    organizationId: string;
+    createdById: string;
+    taskIds?: string[];
+  }) {
+    const aircraft = await prisma.aircraft.findFirst({
+      where: { id: input.aircraftId, organizationId: input.organizationId },
+    });
+    if (!aircraft) throw new AppError('Aircraft not found', 404);
+
+    const number = await this.nextNumber(input.organizationId);
+
+    const wr = await prisma.workRequest.create({
+      data: {
+        number,
+        organizationId: input.organizationId,
+        aircraftId: input.aircraftId,
+        createdById: input.createdById,
+        aircraftHoursAtRequest: aircraft.totalFlightHours,
+        aircraftCyclesN1: aircraft.totalCycles,
+        aircraftCyclesN2: null,
+        items: input.taskIds?.length
+          ? {
+              create: await Promise.all(input.taskIds.map(async (taskId) => {
+                const { payload } = await this.createTaskSnapshot(taskId, input.organizationId);
+                return { ...payload, source: 'AUTO' };
+              })),
+            }
+          : undefined,
+      },
+      include: {
+        items: { include: { task: true, component: true, discrepancy: true } },
+        aircraft: true,
+        responsible: true,
+      },
+    });
+
+    return wr;
+  }
+
+  static async getOrCreateDraftWithTask(input: {
+    aircraftId: string;
+    organizationId: string;
+    createdById: string;
+    taskId: string;
+    source?: 'AUTO' | 'MANUAL';
+  }) {
+    let draft = await this.getOpenDraftByAircraft(input.aircraftId, input.organizationId);
+    if (!draft) {
+      draft = await this.createDraft({
+        aircraftId: input.aircraftId,
+        organizationId: input.organizationId,
+        createdById: input.createdById,
+      });
+    }
+
+    await this.addItem(draft.id, input.organizationId, { taskId: input.taskId, source: input.source ?? 'AUTO' });
+
+    return this.getById(draft.id, input.organizationId);
+  }
+
+  static async getById(id: string, organizationId: string) {
+    const wr = await prisma.workRequest.findFirst({
+      where: { id, organizationId },
+      include: {
+        aircraft: true,
+        responsible: true,
+        createdBy: true,
+        items: { include: { task: true, component: true, discrepancy: true }, orderBy: { addedAt: 'asc' } },
+      },
+    });
+    if (!wr) throw new AppError('Solicitud de Trabajo no encontrada', 404);
+    return wr;
+  }
+
+  static async listByAircraft(aircraftId: string, organizationId: string) {
+    return prisma.workRequest.findMany({
+      where: { aircraftId, organizationId },
+      include: { responsible: true, items: true },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+    });
+  }
+
+  static async listResponsibles(organizationId: string) {
+    return prisma.user.findMany({
+      where: {
+        organizationId,
+        isActive: true,
+        role: { in: ['ADMIN', 'SUPERVISOR', 'INSPECTOR'] },
+      },
+      select: { id: true, name: true, email: true, role: true },
+      orderBy: { name: 'asc' },
+    });
+  }
+
+  static async addItem(
+    workRequestId: string,
+    organizationId: string,
+    input: {
+      taskId?: string;
+      componentId?: string;
+      discrepancyId?: string;
+      category?: WorkRequestItemCategory;
+      code?: string | null;
+      title?: string;
+      description?: string | null;
+      source?: string;
+    },
+  ) {
+    const wr = await this.ensureDraft(workRequestId, organizationId);
+
+    let payload: {
+      taskId?: string | null;
+      componentId?: string | null;
+      discrepancyId?: string | null;
+      category: WorkRequestItemCategory;
+      itemCode?: string | null;
+      itemTitle: string;
+      itemDescription?: string | null;
+    };
+
+    if (input.taskId) {
+      const taskSnapshot = await this.createTaskSnapshot(input.taskId, organizationId);
+      payload = taskSnapshot.payload;
+    } else if (input.componentId) {
+      const component = await prisma.component.findFirst({
+        where: { id: input.componentId, organizationId, aircraftId: wr.aircraftId },
+      });
+      if (!component) throw new AppError('Componente no encontrado para esta aeronave', 404);
+      payload = {
+        componentId: component.id,
+        category: 'COMPONENT_INSPECTION',
+        itemCode: component.partNumber,
+        itemTitle: `${component.description}`,
+        itemDescription: `Componente S/N ${component.serialNumber}${component.position ? ` · Posición ${component.position}` : ''}`,
+      };
+    } else if (input.discrepancyId) {
+      const discrepancy = await prisma.discrepancy.findFirst({
+        where: {
+          id: input.discrepancyId,
+          organizationId,
+          workOrder: { aircraftId: wr.aircraftId },
+        },
+      });
+      if (!discrepancy) throw new AppError('Discrepancia no encontrada para esta aeronave', 404);
+      payload = {
+        discrepancyId: discrepancy.id,
+        category: 'DISCREPANCY',
+        itemCode: discrepancy.code,
+        itemTitle: discrepancy.title,
+        itemDescription: discrepancy.description,
+      };
+    } else {
+      if (!input.title) throw new AppError('Título requerido para ítem manual', 400);
+      payload = {
+        category: input.category ?? 'OTHER',
+        itemCode: input.code ?? null,
+        itemTitle: input.title,
+        itemDescription: input.description ?? null,
+      };
+    }
+
+    const exists = await prisma.workRequestItem.findFirst({
+      where: {
+        workRequestId,
+        OR: [
+          payload.taskId ? { taskId: payload.taskId } : undefined,
+          payload.componentId ? { componentId: payload.componentId } : undefined,
+          payload.discrepancyId ? { discrepancyId: payload.discrepancyId } : undefined,
+          !payload.taskId && !payload.componentId && !payload.discrepancyId
+            ? { itemTitle: payload.itemTitle, category: payload.category }
+            : undefined,
+        ].filter(Boolean) as never,
+      },
+    });
+
+    if (!exists) {
+      await prisma.workRequestItem.create({
+        data: {
+          workRequestId,
+          source: input.source ?? 'MANUAL',
+          ...payload,
+        },
+      });
+    }
+
+    return this.getById(workRequestId, organizationId);
+  }
+
+  static async removeItem(workRequestId: string, itemId: string, organizationId: string) {
+    await this.ensureDraft(workRequestId, organizationId);
+    await prisma.workRequestItem.deleteMany({ where: { id: itemId, workRequestId } });
+    return this.getById(workRequestId, organizationId);
+  }
+
+  static async updateDraft(
+    workRequestId: string,
+    organizationId: string,
+    data: { responsibleId?: string | null; notes?: string | null },
+  ) {
+    const wr = await prisma.workRequest.findFirst({ where: { id: workRequestId, organizationId } });
+    if (!wr) throw new AppError('Solicitud de Trabajo no encontrada', 404);
+    if (wr.status !== 'DRAFT') throw new AppError('Solo se puede editar una ST en borrador', 400);
+
+    return prisma.workRequest.update({
+      where: { id: workRequestId },
+      data: { responsibleId: data.responsibleId ?? null, notes: data.notes ?? null },
+    });
+  }
+
+  static async getCatalog(aircraftId: string, organizationId: string, search?: string) {
+    const plan = await this.aircraftRepo.getMaintenancePlan(aircraftId, organizationId);
+
+    const matchesSearch = (value: string) => search ? value.toLowerCase().includes(search.toLowerCase()) : true;
+
+    const maintenancePlan = plan.filter((item) => {
+      const byHours = item.hoursRemaining != null && item.hoursRemaining > AMBER_HOURS && item.hoursRemaining <= SUGGEST_HOURS;
+      const byDays = item.daysRemaining != null && item.daysRemaining > AMBER_DAYS && item.daysRemaining <= SUGGEST_DAYS;
+      return item.status === 'OK' && matchesSearch(`${item.taskCode} ${item.taskTitle}`) && (byHours || byDays);
+    });
+
+    const normative = plan.filter((item) =>
+      ['AD', 'SB', 'CMR', 'CDCCL', 'MPD', 'ETOPS'].includes(item.referenceType)
+      && matchesSearch(`${item.taskCode} ${item.taskTitle} ${item.referenceNumber ?? ''}`),
+    );
+
+    const componentInspection = plan.filter((item) =>
+      (item.referenceType === 'AMM' || item.taskTitle.toLowerCase().includes('inspect'))
+      && matchesSearch(`${item.taskCode} ${item.taskTitle}`),
+    );
+
+    const components = await prisma.component.findMany({
+      where: {
+        organizationId,
+        aircraftId,
+        isActive: true,
+        OR: search ? [
+          { partNumber: { contains: search, mode: 'insensitive' } },
+          { serialNumber: { contains: search, mode: 'insensitive' } },
+          { description: { contains: search, mode: 'insensitive' } },
+        ] : undefined,
+      },
+      orderBy: { partNumber: 'asc' },
+    });
+
+    const discrepancies = await prisma.discrepancy.findMany({
+      where: {
+        organizationId,
+        status: { in: ['OPEN', 'DEFERRED'] },
+        workOrder: { aircraftId },
+        OR: search ? [
+          { code: { contains: search, mode: 'insensitive' } },
+          { title: { contains: search, mode: 'insensitive' } },
+          { description: { contains: search, mode: 'insensitive' } },
+        ] : undefined,
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 30,
+    });
+
+    return {
+      maintenancePlan,
+      normative,
+      componentInspection,
+      components,
+      discrepancies,
+    };
+  }
+
+  static async send(workRequestId: string, organizationId: string, sentById: string) {
+    const wr = await this.getById(workRequestId, organizationId);
+    if (wr.status !== 'DRAFT') throw new AppError('Solo se puede enviar una ST en borrador', 400);
+    if (!wr.responsibleId) throw new AppError('Debe asignar un responsable antes de enviar', 400);
+    if (wr.items.length === 0) throw new AppError('La ST no tiene tareas incluidas', 400);
+
+    return prisma.workRequest.update({
+      where: { id: workRequestId },
+      data: { status: 'SENT', sentAt: new Date(), sentById },
+      include: { responsible: true, aircraft: true, items: { include: { task: true, component: true, discrepancy: true } } },
+    });
+  }
+
+  static async closeAndComply(input: {
+    workRequestId: string;
+    organizationId: string;
+    user: { id: string; name?: string; email: string; role: string };
+    aircraftHoursAtClose: number;
+    aircraftCyclesN1AtClose: number;
+    aircraftCyclesN2AtClose: number;
+    closedAt?: Date;
+    evidenceFileUrl: string;
+    evidenceFileName: string;
+    notes?: string | null;
+  }) {
+    const wr = await prisma.workRequest.findFirst({
+      where: { id: input.workRequestId, organizationId: input.organizationId },
+      include: {
+        items: { include: { task: true } },
+      },
+    });
+
+    if (!wr) throw new AppError('Solicitud de Trabajo no encontrada', 404);
+    if (wr.status !== 'SENT') {
+      throw new AppError('La ST debe estar en estado ENVIADA antes de cerrar y cumplir', 400);
+    }
+
+    const closeDate = input.closedAt ?? new Date();
+
+    const taskItems = wr.items.filter((item) => !!item.taskId && !!item.task);
+    if (taskItems.length === 0) {
+      throw new AppError('La ST no contiene tareas con cumplimiento registrable', 400);
+    }
+
+    const existingComplianceCount = await prisma.compliance.count({
+      where: {
+        organizationId: input.organizationId,
+        aircraftId: wr.aircraftId,
+        workOrderNumber: wr.number,
+      },
+    });
+    if (existingComplianceCount > 0) {
+      throw new AppError('Esta ST ya fue cerrada y cumplida previamente', 400);
+    }
+
+    const created = await prisma.$transaction(async (tx) => {
+      const createdRows: Array<{ id: string }> = [];
+
+      for (const item of taskItems) {
+        const task = item.task!;
+          const taskForDue: import('../entities/MaintenanceTask').MaintenanceTask = {
+            ...task,
+            intervalHours: task.intervalHours != null ? Number(task.intervalHours) : null,
+            intervalCycles: task.intervalCycles,
+            intervalCalendarDays: task.intervalCalendarDays,
+            intervalCalendarMonths: task.intervalCalendarMonths,
+            toleranceHours: task.toleranceHours != null ? Number(task.toleranceHours) : null,
+            toleranceCycles: task.toleranceCycles,
+            toleranceCalendarDays: task.toleranceCalendarDays,
+            estimatedManHours: task.estimatedManHours != null ? Number(task.estimatedManHours) : null,
+          };
+        const computed = this.dueDateService.calculate(
+            taskForDue,
+          input.aircraftHoursAtClose,
+          input.aircraftCyclesN1AtClose,
+          closeDate,
+        );
+
+        const legalRef = `${task.referenceType}${task.referenceNumber ? ` ${task.referenceNumber}` : ''}`;
+        const noteParts = [
+          `ST ${wr.number}`,
+          `Sustento ${legalRef}`,
+          `Evidencia ${input.evidenceFileUrl}`,
+          `Archivo ${input.evidenceFileName}`,
+          `Ciclos N2 ${input.aircraftCyclesN2AtClose}`,
+          input.notes?.trim() ?? null,
+        ].filter(Boolean);
+
+        const compliance = await tx.compliance.create({
+          data: {
+            organizationId: input.organizationId,
+            aircraftId: wr.aircraftId,
+            taskId: item.taskId!,
+            componentId: item.componentId ?? null,
+            performedById: input.user.id,
+            performedAt: closeDate,
+            aircraftHoursAtCompliance: input.aircraftHoursAtClose,
+            aircraftCyclesAtCompliance: input.aircraftCyclesN1AtClose,
+            nextDueHours: computed.nextDueHours,
+            nextDueCycles: computed.nextDueCycles,
+            nextDueDate: computed.nextDueDate,
+            workOrderNumber: wr.number,
+            notes: noteParts.join(' | '),
+          },
+          select: { id: true },
+        });
+        createdRows.push(compliance);
+      }
+
+      await tx.workRequest.update({
+        where: { id: wr.id },
+        data: {
+          notes: [
+            wr.notes?.trim() ?? null,
+            `[CLOSE_AND_COMPLY ${closeDate.toISOString()}] FH ${input.aircraftHoursAtClose} N1 ${input.aircraftCyclesN1AtClose} N2 ${input.aircraftCyclesN2AtClose} EVIDENCE ${input.evidenceFileName}`,
+          ].filter(Boolean).join('\n'),
+        },
+      });
+
+      return createdRows;
+    });
+
+    await auditLogService.log({
+      organizationId: input.organizationId,
+      entityType: 'WorkRequest',
+      entityId: wr.id,
+      action: 'CLOSE_AND_COMPLY',
+      previousValue: { status: wr.status },
+      newValue: {
+        status: wr.status,
+        generatedCompliances: created.length,
+        workRequestNumber: wr.number,
+      },
+      userId: input.user.id,
+      userEmail: input.user.email,
+      userRole: input.user.role,
+      metadata: {
+        message: `Usuario ${input.user.name ?? input.user.email} cerró ST ${wr.number} y generó ${created.length} cumplimientos legales`,
+        evidenceFileUrl: input.evidenceFileUrl,
+        evidenceFileName: input.evidenceFileName,
+      },
+    });
+
+    return {
+      workRequestId: wr.id,
+      workRequestNumber: wr.number,
+      generatedCompliances: created.length,
+      evidenceFileUrl: input.evidenceFileUrl,
+      closedAt: closeDate.toISOString(),
+    };
+  }
+
+  static async getAirworthinessHistory(aircraftId: string, organizationId: string) {
+    const rows = await prisma.compliance.findMany({
+      where: {
+        aircraftId,
+        organizationId,
+        workOrderNumber: { startsWith: 'ST-' },
+      },
+      include: {
+        task: {
+          select: {
+            code: true,
+            title: true,
+            referenceType: true,
+            referenceNumber: true,
+          },
+        },
+      },
+      orderBy: { performedAt: 'desc' },
+      take: 500,
+    });
+
+    return rows.map((row) => {
+      const evidenceMatch = row.notes?.match(/Evidencia\s([^|]+)/i);
+      const legalInNotes = row.notes?.match(/Sustento\s([^|]+)/i);
+      return {
+        id: row.id,
+        date: row.performedAt,
+        taskCode: row.task.code,
+        taskTitle: row.task.title,
+        flightHours: Number(row.aircraftHoursAtCompliance),
+        cycles: row.aircraftCyclesAtCompliance,
+        legalBasis: legalInNotes?.[1]?.trim() || `${row.task.referenceType}${row.task.referenceNumber ? ` / ${row.task.referenceNumber}` : ''}`,
+        evidenceUrl: evidenceMatch?.[1]?.trim() ?? null,
+        workRequestNumber: row.workOrderNumber,
+      };
+    });
+  }
+
+  static async runDailyAutoGenerationForAllOrganizations(): Promise<{ created: number; updated: number; scanned: number }> {
+    const aircraftList = await prisma.aircraft.findMany({
+      where: { isActive: true, status: { not: 'DECOMMISSIONED' } },
+      select: { id: true, organizationId: true },
+    });
+
+    let created = 0;
+    let updated = 0;
+    let scanned = 0;
+
+    for (const a of aircraftList) {
+      const plan = await this.aircraftRepo.getMaintenancePlan(a.id, a.organizationId);
+      const amber = plan.filter((item) => {
+        const byHours = item.hoursRemaining != null && item.hoursRemaining <= AMBER_HOURS;
+        const byDays = item.daysRemaining != null && item.daysRemaining <= AMBER_DAYS;
+        return (byHours || byDays || item.status === 'OVERDUE')
+          && this.isChapter0405(item.taskCode, item.referenceNumber);
+      });
+
+      if (amber.length === 0) {
+        scanned += plan.length;
+        continue;
+      }
+
+      let draft = await this.getOpenDraftByAircraft(a.id, a.organizationId);
+      const hadDraft = !!draft;
+      if (!draft) {
+        const fallbackUser = await prisma.user.findFirst({
+          where: {
+            organizationId: a.organizationId,
+            isActive: true,
+            role: { in: ['ADMIN', 'SUPERVISOR'] },
+          },
+          select: { id: true },
+          orderBy: { createdAt: 'asc' },
+        });
+
+        if (!fallbackUser) {
+          scanned += plan.length;
+          continue;
+        }
+
+        draft = await this.createDraft({
+          aircraftId: a.id,
+          organizationId: a.organizationId,
+          createdById: fallbackUser.id,
+        });
+      }
+
+      const result = await prisma.workRequestItem.createMany({
+        data: await Promise.all(amber.map(async (item) => {
+          const { payload } = await this.createTaskSnapshot(item.taskId, a.organizationId);
+          return { workRequestId: draft.id, source: 'AUTO', ...payload };
+        })),
+        skipDuplicates: true,
+      });
+
+      if (result.count > 0) {
+        if (hadDraft) updated += result.count;
+        else created += 1;
+      }
+      scanned += plan.length;
+    }
+
+    return { created, updated, scanned };
+  }
+}

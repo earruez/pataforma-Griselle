@@ -14,6 +14,7 @@ const createSchema = z.object({
   intervalHours:         z.number().positive().optional().nullable(),
   intervalCycles:        z.number().int().positive().optional().nullable(),
   intervalCalendarDays:  z.number().int().positive().optional().nullable(),
+  intervalCalendarMonths:z.number().int().positive().optional().nullable(),
   toleranceHours:        z.number().nonnegative().optional().nullable(),
   toleranceCycles:       z.number().int().nonnegative().optional().nullable(),
   toleranceCalendarDays: z.number().int().nonnegative().optional().nullable(),

@@ -12,6 +12,10 @@ export interface RecordComplianceInput {
   aircraftId: string;
   taskId: string;
   componentId?: string | null;
+  aircraftHoursAtCompliance?: number;
+  nextDueHours?: number | null;
+  nextDueCycles?: number | null;
+  nextDueDate?: Date | null;
   performedById: string;
   inspectedById?: string | null;
   performedAt: Date;
@@ -55,13 +59,19 @@ export class RecordComplianceUseCase {
     const task = await this.getTask(input.taskId, input.organizationId);
     if (!task) throw new NotFoundError('MaintenanceTask', input.taskId);
 
+    const hoursAtCompliance = input.aircraftHoursAtCompliance ?? aircraft.totalFlightHours;
+
     // 4. Calculate next-due — this is the integrity-critical calculation
-    const { nextDueHours, nextDueCycles, nextDueDate } = this.dueDateService.calculate(
+    const computed = this.dueDateService.calculate(
       task,
-      aircraft.totalFlightHours,
+      hoursAtCompliance,
       aircraft.totalCycles,
       input.performedAt,
     );
+
+    const nextDueHours = input.nextDueHours ?? computed.nextDueHours;
+    const nextDueCycles = input.nextDueCycles ?? computed.nextDueCycles;
+    const nextDueDate = input.nextDueDate ?? computed.nextDueDate;
 
     const complianceInput: CreateComplianceInput = {
       ...input,
@@ -71,7 +81,7 @@ export class RecordComplianceUseCase {
       notes:           input.notes           ?? null,
       deferralReference: input.deferralReference ?? null,
       deferralExpiresAt: input.deferralExpiresAt ?? null,
-      aircraftHoursAtCompliance: aircraft.totalFlightHours,
+      aircraftHoursAtCompliance: hoursAtCompliance,
       aircraftCyclesAtCompliance: aircraft.totalCycles,
       nextDueHours,
       nextDueCycles,

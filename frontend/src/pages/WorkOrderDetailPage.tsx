@@ -7,13 +7,14 @@ import {
   AlertTriangle, ShieldCheck, Loader2, Plus, Check, FileText,
   ChevronDown, X, AlertCircle, Activity, Download, Lock, Pencil,
   Stamp, Timer, GitBranch, Wrench, ListChecks, Shield, Edit3,
-  AlertOctagon, RefreshCw, Eye,
+  AlertOctagon, RefreshCw, Eye, UserCheck, Upload, Mail,
 } from 'lucide-react';
 import { useAuthStore } from '@store/authStore';
 import {
   workOrdersApi,
   type WorkOrder,
   type WorkOrderStatus,
+  type WorkOrderAssignmentStatus,
   type WOTask,
   type Discrepancy,
   type AuditLogEntry,
@@ -22,6 +23,8 @@ import {
   type CreateWorkOrderInput,
   type DiscrepancyStatus,
 } from '@api/workOrders.api';
+import { TechnicianAssignmentModal } from '@components/workOrders/TechnicianAssignmentModal';
+import { EvidenceUpload, EvidenceViewer } from '@components/workOrders/EvidenceUpload';
 
 // ── Status config ──────────────────────────────────────────────────────────
 
@@ -1598,6 +1601,210 @@ function CloseStampModal({
 
 // ── Main Detail Page ───────────────────────────────────────────────────────
 
+// ── Assignment Workflow Panel ─────────────────────────────────────────────
+
+const ASSIGNMENT_STATUS_LABELS: Record<WorkOrderAssignmentStatus, string> = {
+  PENDING:          'Pendiente de asignación',
+  ASSIGNED:         'Asignado',
+  IN_PROGRESS:      'En ejecución',
+  AWAITING_EVIDENCE:'Requiere evidencia',
+  EVIDENCE_UPLOADED:'Evidencia recibida',
+  CLOSED:           'Cerrada',
+};
+
+const ASSIGNMENT_STATUS_COLORS: Record<WorkOrderAssignmentStatus, string> = {
+  PENDING:          'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/20',
+  ASSIGNED:         'bg-blue-50 text-blue-700 ring-1 ring-inset ring-blue-600/20',
+  IN_PROGRESS:      'bg-violet-50 text-violet-700 ring-1 ring-inset ring-violet-600/20',
+  AWAITING_EVIDENCE:'bg-orange-50 text-orange-700 ring-1 ring-inset ring-orange-600/20',
+  EVIDENCE_UPLOADED:'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-600/20',
+  CLOSED:           'bg-slate-100 text-slate-600 ring-1 ring-inset ring-slate-500/20',
+};
+
+interface AssignmentWorkflowPanelProps {
+  workOrder: WorkOrder;
+  onAssignClick: () => void;
+  onStartExecution: () => void;
+  onClose: () => void;
+  onEmailPdf: (email: string) => void;
+  isStartingExecution: boolean;
+  isClosing: boolean;
+  isSendingEmail: boolean;
+  currentUserId?: string;
+  canAssign: boolean;
+  showEmailInput: boolean;
+  setShowEmailInput: (v: boolean) => void;
+  emailTarget: string;
+  setEmailTarget: (v: string) => void;
+}
+
+function AssignmentWorkflowPanel({
+  workOrder: wo,
+  onAssignClick,
+  onStartExecution,
+  onClose,
+  onEmailPdf,
+  isStartingExecution,
+  isClosing,
+  isSendingEmail,
+  currentUserId,
+  canAssign,
+  showEmailInput,
+  setShowEmailInput,
+  emailTarget,
+  setEmailTarget,
+}: AssignmentWorkflowPanelProps) {
+  const qc = useQueryClient();
+  const assignmentStatus: WorkOrderAssignmentStatus = wo.assignmentStatus ?? 'PENDING';
+  const isAssignedToMe = wo.assignedTechnicianId === currentUserId;
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 shadow-card p-5 space-y-5">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <UserCheck size={16} className="text-slate-500" />
+          <h3 className="font-semibold text-slate-800 text-sm">Flujo de Asignación</h3>
+        </div>
+        <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-bold ${ASSIGNMENT_STATUS_COLORS[assignmentStatus]}`}>
+          {ASSIGNMENT_STATUS_LABELS[assignmentStatus]}
+        </span>
+      </div>
+
+      {/* Assignment workflow steps */}
+      <div className="flex items-center gap-1.5 text-xs overflow-x-auto">
+        {(['PENDING', 'ASSIGNED', 'IN_PROGRESS', 'AWAITING_EVIDENCE', 'EVIDENCE_UPLOADED', 'CLOSED'] as WorkOrderAssignmentStatus[]).map((step, i, arr) => {
+          const steps = ['PENDING', 'ASSIGNED', 'IN_PROGRESS', 'AWAITING_EVIDENCE', 'EVIDENCE_UPLOADED', 'CLOSED'];
+          const currentIdx = steps.indexOf(assignmentStatus);
+          const stepIdx = steps.indexOf(step);
+          const done = stepIdx < currentIdx;
+          const active = stepIdx === currentIdx;
+          const labels = ['Pendiente', 'Asignado', 'En ejecución', 'Esp. evidencia', 'Evidencia OK', 'Cerrada'];
+          return (
+            <div key={step} className="flex items-center gap-1.5 shrink-0">
+              <div className={`flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold transition-colors ${
+                active ? 'bg-blue-600 text-white' :
+                done   ? 'bg-emerald-100 text-emerald-700' :
+                         'bg-slate-100 text-slate-400'
+              }`}>
+                {done ? <Check size={9} strokeWidth={3} /> : null}
+                {labels[stepIdx]}
+              </div>
+              {i < arr.length - 1 && <div className={`h-px w-3 flex-shrink-0 ${stepIdx < currentIdx ? 'bg-emerald-400' : 'bg-slate-200'}`} />}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        {/* PDF Download button */}
+        <a
+          href={`/api/v1/work-orders/${wo.id}/download-pdf`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors"
+        >
+          <Download size={12} />
+          Descargar PDF
+        </a>
+
+        {/* Email PDF button */}
+        {!showEmailInput ? (
+          <button
+            onClick={() => setShowEmailInput(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors"
+          >
+            <Mail size={12} />
+            Enviar PDF por email
+          </button>
+        ) : (
+          <div className="flex items-center gap-2 flex-1 min-w-0">
+            <input
+              type="email"
+              value={emailTarget}
+              onChange={(e) => setEmailTarget(e.target.value)}
+              placeholder="correo@ejemplo.com"
+              className="flex-1 px-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <button
+              disabled={!emailTarget.includes('@') || isSendingEmail}
+              onClick={() => onEmailPdf(emailTarget)}
+              className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+            >
+              {isSendingEmail ? <Loader2 size={10} className="animate-spin" /> : <Mail size={10} />}
+              Enviar
+            </button>
+            <button onClick={() => { setShowEmailInput(false); setEmailTarget(''); }} className="p-1.5 text-slate-400 hover:text-slate-600">
+              <X size={12} />
+            </button>
+          </div>
+        )}
+
+        {/* Assign button — only for SUPERVISOR/ADMIN and when PENDING */}
+        {assignmentStatus === 'PENDING' && canAssign && (
+          <button
+            onClick={onAssignClick}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
+          >
+            <UserCheck size={12} />
+            Asignar Técnico
+          </button>
+        )}
+
+        {/* Start execution — only for assigned technician */}
+        {assignmentStatus === 'ASSIGNED' && isAssignedToMe && (
+          <button
+            onClick={onStartExecution}
+            disabled={isStartingExecution}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-violet-600 rounded-lg hover:bg-violet-700 disabled:opacity-50 transition-colors"
+          >
+            {isStartingExecution ? <Loader2 size={12} className="animate-spin" /> : <Wrench size={12} />}
+            Iniciar Ejecución
+          </button>
+        )}
+
+        {/* Close button — only when evidence uploaded */}
+        {assignmentStatus === 'EVIDENCE_UPLOADED' && canAssign && (
+          <button
+            onClick={onClose}
+            disabled={isClosing}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors"
+          >
+            {isClosing ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+            Cerrar OT
+          </button>
+        )}
+      </div>
+
+      {/* Evidence section */}
+      {(assignmentStatus === 'IN_PROGRESS' || assignmentStatus === 'AWAITING_EVIDENCE') && isAssignedToMe && (
+        <div className="border-t border-slate-100 pt-4">
+          <h4 className="text-xs font-semibold text-slate-600 uppercase tracking-wide mb-3">Evidencia del Trabajo</h4>
+          <EvidenceUpload
+            workOrderId={wo.id}
+            onUploaded={() => qc.invalidateQueries({ queryKey: ['work-order', wo.id] })}
+          />
+        </div>
+      )}
+
+      {/* Show evidence viewer when already uploaded */}
+      {wo.evidenceFileUrl && (
+        <div className="border-t border-slate-100 pt-4">
+          <h4 className="text-xs font-semibold text-slate-600 uppercase tracking-wide mb-3">Evidencia del Trabajo</h4>
+          <EvidenceViewer
+            evidenceUrl={wo.evidenceFileUrl}
+            evidenceFileName={wo.evidenceFileName}
+            evidenceUploadedAt={wo.evidenceUploadedAt}
+            evidenceType={wo.evidenceType}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main Page ──────────────────────────────────────────────────────────────
+
 export default function WorkOrderDetailPage() {
   const { id } = useParams<{ id: string }>();
   const qc = useQueryClient();
@@ -1605,6 +1812,44 @@ export default function WorkOrderDetailPage() {
   const [showEdit, setShowEdit] = useState(false);
   const [showStamp, setShowStamp] = useState(false);
   const [showRejectConfirm, setShowRejectConfirm] = useState(false);
+  const [showAssignModal, setShowAssignModal] = useState(false);
+  const [showEmailInput, setShowEmailInput] = useState(false);
+  const [emailTarget, setEmailTarget] = useState('');
+
+  const closeMutation = useMutation({
+    mutationFn: () => workOrdersApi.closeWorkOrder(id!),
+    onSuccess: () => {
+      toast.success('Orden de Trabajo cerrada exitosamente');
+      qc.invalidateQueries({ queryKey: ['work-order', id] });
+      qc.invalidateQueries({ queryKey: ['work-orders'] });
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.message || 'No se pudo cerrar la OT');
+    },
+  });
+
+  const startExecutionMutation = useMutation({
+    mutationFn: () => workOrdersApi.startExecution(id!),
+    onSuccess: () => {
+      toast.success('Ejecución iniciada');
+      qc.invalidateQueries({ queryKey: ['work-order', id] });
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.message || 'Error al iniciar ejecución');
+    },
+  });
+
+  const emailPdfMutation = useMutation({
+    mutationFn: (email: string) => workOrdersApi.emailPdf(id!, email),
+    onSuccess: () => {
+      toast.success('PDF enviado por correo');
+      setShowEmailInput(false);
+      setEmailTarget('');
+    },
+    onError: () => {
+      toast.error('Error al enviar PDF por correo');
+    },
+  });
 
   const { data: wo, isLoading, isError } = useQuery({
     queryKey: ['work-order', id],
@@ -1701,6 +1946,26 @@ export default function WorkOrderDetailPage() {
 
       {/* Lifecycle stepper */}
       <LifecycleStepper current={wo.status} />
+
+      {/* Assignment Workflow Panel */}
+      {wo.status !== 'DRAFT' && (
+        <AssignmentWorkflowPanel
+          workOrder={wo}
+          onAssignClick={() => setShowAssignModal(true)}
+          onStartExecution={() => startExecutionMutation.mutate()}
+          onClose={() => closeMutation.mutate()}
+          onEmailPdf={(email) => emailPdfMutation.mutate(email)}
+          isStartingExecution={startExecutionMutation.isPending}
+          isClosing={closeMutation.isPending}
+          isSendingEmail={emailPdfMutation.isPending}
+          currentUserId={user?.id}
+          canAssign={user?.role === 'ADMIN' || user?.role === 'SUPERVISOR'}
+          showEmailInput={showEmailInput}
+          setShowEmailInput={setShowEmailInput}
+          emailTarget={emailTarget}
+          setEmailTarget={setEmailTarget}
+        />
+      )}
 
       {/* Header card */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-card p-6">
@@ -1954,6 +2219,20 @@ export default function WorkOrderDetailPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Technician Assignment Modal */}
+      {showAssignModal && (
+        <TechnicianAssignmentModal
+          workOrderId={wo.id}
+          workOrderNumber={wo.number}
+          organizationId={wo.organizationId}
+          onClose={() => setShowAssignModal(false)}
+          onAssigned={() => {
+            qc.invalidateQueries({ queryKey: ['work-order', id] });
+            qc.invalidateQueries({ queryKey: ['work-orders'] });
+          }}
+        />
       )}
     </div>
   );

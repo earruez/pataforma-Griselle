@@ -1,0 +1,200 @@
+import { NextFunction, Request, Response } from 'express';
+import { z } from 'zod';
+import { WorkRequestService } from '../../../domain/services/WorkRequestService';
+import { WorkRequestDocumentService } from '../../../domain/services/WorkRequestDocumentService';
+import { EmailService } from '../../../domain/services/EmailService';
+import { FileStorageService } from '../../../domain/services/FileStorageService';
+
+const createSchema = z.object({
+  aircraftId: z.string().uuid(),
+  taskIds: z.array(z.string().uuid()).optional(),
+});
+
+const updateSchema = z.object({
+  responsibleId: z.string().uuid().nullable().optional(),
+  notes: z.string().max(2000).nullable().optional(),
+});
+
+const addItemSchema = z.object({
+  taskId: z.string().uuid().optional(),
+  componentId: z.string().uuid().optional(),
+  discrepancyId: z.string().uuid().optional(),
+  category: z.enum(['MAINTENANCE_PLAN', 'NORMATIVE', 'COMPONENT_INSPECTION', 'DISCREPANCY', 'OTHER']).optional(),
+  code: z.string().max(100).nullable().optional(),
+  title: z.string().max(255).optional(),
+  description: z.string().max(5000).nullable().optional(),
+  source: z.string().max(20).optional(),
+});
+const emailSchema = z.object({ email: z.string().email().optional() });
+const closeAndComplySchema = z.object({
+  aircraftHoursAtClose: z.coerce.number().nonnegative(),
+  aircraftCyclesN1AtClose: z.coerce.number().int().nonnegative(),
+  aircraftCyclesN2AtClose: z.coerce.number().int().nonnegative(),
+  closedAt: z.coerce.date().optional(),
+  notes: z.string().max(3000).optional(),
+  evidenceUrl: z.string().url().optional(),
+  evidenceFileName: z.string().max(255).optional(),
+});
+
+export class WorkRequestController {
+  static async createDraft(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { aircraftId, taskIds } = createSchema.parse(req.body);
+      const wr = await WorkRequestService.createDraft({
+        aircraftId,
+        taskIds,
+        organizationId: req.organizationId,
+        createdById: req.currentUser.id,
+      });
+      res.status(201).json({ status: 'success', data: wr });
+    } catch (err) { next(err); }
+  }
+
+  static async listByAircraft(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const data = await WorkRequestService.listByAircraft(req.params.aircraftId, req.organizationId);
+      res.json({ status: 'success', data });
+    } catch (err) { next(err); }
+  }
+
+  static async getById(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const data = await WorkRequestService.getById(req.params.id, req.organizationId);
+      res.json({ status: 'success', data });
+    } catch (err) { next(err); }
+  }
+
+  static async updateDraft(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const body = updateSchema.parse(req.body);
+      const data = await WorkRequestService.updateDraft(req.params.id, req.organizationId, body);
+      res.json({ status: 'success', data });
+    } catch (err) { next(err); }
+  }
+
+  static async addItem(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const body = addItemSchema.parse(req.body);
+      const data = await WorkRequestService.addItem(req.params.id, req.organizationId, body);
+      res.json({ status: 'success', data });
+    } catch (err) { next(err); }
+  }
+
+  static async removeItem(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const data = await WorkRequestService.removeItem(req.params.id, req.params.itemId, req.organizationId);
+      res.json({ status: 'success', data });
+    } catch (err) { next(err); }
+  }
+
+  static async listCatalog(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const search = typeof req.query.search === 'string' ? req.query.search : undefined;
+      const data = await WorkRequestService.getCatalog(req.params.aircraftId, req.organizationId, search);
+      res.json({ status: 'success', data });
+    } catch (err) { next(err); }
+  }
+
+  static async listResponsibles(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const data = await WorkRequestService.listResponsibles(req.organizationId);
+      res.json({ status: 'success', data });
+    } catch (err) { next(err); }
+  }
+
+  static async generatePdf(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const wr = await WorkRequestService.getById(req.params.id, req.organizationId);
+      const pdf = await WorkRequestDocumentService.generateSTDocument(wr.id);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${wr.number}.pdf"`);
+      res.send(pdf);
+    } catch (err) { next(err); }
+  }
+
+  static async sendEmail(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { email } = emailSchema.parse(req.body);
+      const wr = await WorkRequestService.send(req.params.id, req.organizationId, req.currentUser.id);
+      const pdf = await WorkRequestDocumentService.generateSTDocument(wr.id);
+      const pdfPath = await WorkRequestDocumentService.savePdfToFile(pdf, `${wr.number}.pdf`);
+
+      const target = email ?? wr.responsible?.email;
+      if (!target) throw new Error('No se encontró email de responsable');
+
+      EmailService.initialize();
+      await EmailService.sendWorkRequestNotification({
+        to: target,
+        responsibleName: wr.responsible?.name ?? 'Responsable',
+        workRequestNumber: wr.number,
+        aircraftRegistration: wr.aircraft.registration,
+        aircraftModel: wr.aircraft.model,
+        pdfAttachmentPath: pdfPath,
+      });
+
+      res.json({ status: 'success', message: 'Solicitud enviada por correo', data: wr });
+    } catch (err) { next(err); }
+  }
+
+  static async runDailyJob(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const data = await WorkRequestService.runDailyAutoGenerationForAllOrganizations();
+      res.json({ status: 'success', data });
+    } catch (err) { next(err); }
+  }
+
+  static async closeAndComply(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const body = closeAndComplySchema.parse(req.body);
+
+      let evidenceFileUrl = body.evidenceUrl;
+      let evidenceFileName = body.evidenceFileName;
+
+      if (req.file) {
+        const uploaded = await FileStorageService.uploadEvidenceFile(
+          req.file.buffer,
+          req.params.id,
+          req.file.originalname,
+          req.organizationId,
+        );
+        evidenceFileUrl = uploaded.url;
+        evidenceFileName = uploaded.originalName;
+      }
+
+      if (!evidenceFileUrl || !evidenceFileName) {
+        res.status(400).json({
+          status: 'error',
+          code: 'VALIDATION_ERROR',
+          message: 'Debe adjuntar evidencia documental (foto/PDF de OT firmada)',
+        });
+        return;
+      }
+
+      const data = await WorkRequestService.closeAndComply({
+        workRequestId: req.params.id,
+        organizationId: req.organizationId,
+        user: {
+          id: req.currentUser.id,
+          email: req.currentUser.email,
+          role: req.currentUser.role,
+        },
+        aircraftHoursAtClose: body.aircraftHoursAtClose,
+        aircraftCyclesN1AtClose: body.aircraftCyclesN1AtClose,
+        aircraftCyclesN2AtClose: body.aircraftCyclesN2AtClose,
+        closedAt: body.closedAt,
+        evidenceFileUrl,
+        evidenceFileName,
+        notes: body.notes,
+      });
+
+      res.json({ status: 'success', data });
+    } catch (err) { next(err); }
+  }
+
+  static async airworthinessHistory(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const data = await WorkRequestService.getAirworthinessHistory(req.params.aircraftId, req.organizationId);
+      res.json({ status: 'success', data });
+    } catch (err) { next(err); }
+  }
+}

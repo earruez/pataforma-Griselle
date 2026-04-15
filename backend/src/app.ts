@@ -12,6 +12,10 @@ import { componentRoutes } from './infrastructure/http/routes/component.routes';
 import { taskRoutes } from './infrastructure/http/routes/tasks.routes';
 import { workOrderRoutes } from './infrastructure/http/routes/workOrders.routes';
 import { componentHistoryRouter, aircraftHistoryRouter, auditRouter } from './infrastructure/http/routes/componentHistory.routes';
+import { templateLibraryRouter } from './infrastructure/http/controllers/TemplateLibraryController';
+import { workOrderFlowRouter } from './infrastructure/http/routes/workOrderFlowRoutes';
+import { workRequestRoutes } from './infrastructure/http/routes/workRequests.routes';
+import { grisselleMroRoutes } from './infrastructure/http/routes/grisselleMro.routes';
 
 export function createApp(): Application {
   const app = express();
@@ -44,7 +48,13 @@ export function createApp(): Application {
   app.use(`${API}/components`,       componentHistoryRouter);
   app.use(`${API}/tasks`,            taskRoutes);
   app.use(`${API}/work-orders`,      workOrderRoutes);
+  app.use(`${API}/work-orders`,      workOrderFlowRouter);
   app.use(`${API}/audit-logs`,       auditRouter);
+  app.use(`${API}/library`,          templateLibraryRouter);
+  app.use(`${API}/work-requests`,    workRequestRoutes);
+
+  // Compatibility routes for Grisselle MRO integration without version prefix.
+  app.use('/api',                    grisselleMroRoutes);
 
   app.use((_req: Request, res: Response) => {
     res.status(404).json({ status: 'error', code: 'NOT_FOUND', message: 'Route not found' });

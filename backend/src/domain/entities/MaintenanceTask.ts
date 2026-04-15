@@ -26,6 +26,7 @@ export interface MaintenanceTask {
   intervalHours: number | null;
   intervalCycles: number | null;
   intervalCalendarDays: number | null;
+  intervalCalendarMonths: number | null;
   toleranceHours: number | null;
   toleranceCycles: number | null;
   toleranceCalendarDays: number | null;
@@ -51,6 +52,7 @@ export type CreateMaintenanceTaskInput = Pick<
   | 'intervalHours'
   | 'intervalCycles'
   | 'intervalCalendarDays'
+  | 'intervalCalendarMonths'
   | 'toleranceHours'
   | 'toleranceCycles'
   | 'toleranceCalendarDays'

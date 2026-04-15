@@ -1,0 +1,164 @@
+import { useWorkRequestStore } from '../../store/workRequestStore';
+import { WorkRequestBadge } from './WorkRequestBadges';
+import { canSendToTechnicalOffice, getVisibleSTStatus } from '../../shared/workRequestTypes';
+import { saveAs } from 'file-saver';
+import { FolderOpen, SearchX } from 'lucide-react';
+
+const SOURCE_LABELS: Record<string, string> = {
+  maintenance_plan: 'Plan',
+  component_inspection: 'Componentes',
+  discrepancy: 'Discrepancia',
+  compliance_due: 'Vencimiento',
+  manual: 'Manual',
+};
+
+function getOriginLabel(sourceKinds: string[]): string {
+  if (sourceKinds.length === 0) return '-';
+  const unique = Array.from(new Set(sourceKinds));
+  if (unique.length === 1) return SOURCE_LABELS[unique[0]] ?? 'Manual';
+  return 'Mixto';
+}
+
+export function WorkRequestTable() {
+  const workRequests = useWorkRequestStore((s) => s.workRequests);
+  const viewDensity = useWorkRequestStore((s) => s.viewDensity);
+  const filterAircraftId = useWorkRequestStore((s) => s.filterAircraftId);
+  const filterStatus = useWorkRequestStore((s) => s.filterStatus);
+  const searchText = useWorkRequestStore((s) => s.searchText).toLowerCase();
+  const selectWorkRequest = useWorkRequestStore((s) => s.selectWorkRequest);
+  const sendWorkRequest = useWorkRequestStore((s) => s.sendWorkRequest);
+  const setFilterAircraftId = useWorkRequestStore((s) => s.setFilterAircraftId);
+  const setFilterStatus = useWorkRequestStore((s) => s.setFilterStatus);
+  const setSearchText = useWorkRequestStore((s) => s.setSearchText);
+
+  const handleSend = (workRequestId: string) => {
+    const wr = workRequests.find((item) => item.id === workRequestId);
+    if (!wr || !canSendToTechnicalOffice(wr.status)) return;
+    sendWorkRequest(workRequestId);
+  };
+
+  const handleDownloadPdf = (workRequestId: string) => {
+    const wr = workRequests.find((item) => item.id === workRequestId);
+    if (!wr) return;
+
+    const content = [
+      'Solicitud de Trabajo (ST)',
+      '',
+      `N° ST: ${wr.folio}`,
+      `Aeronave: ${wr.aircraftId}`,
+      `Prioridad: ${wr.priority}`,
+      `Estado visible: ${getVisibleSTStatus(wr.status)}`,
+      '',
+      'Items:',
+      ...wr.items.map((i) => `- ${i.title} (${i.ataCode})`),
+    ].join('\n');
+
+    const blob = new Blob([content], { type: 'application/pdf' });
+    saveAs(blob, `${wr.folio}.pdf`);
+  };
+
+  const filtered = workRequests.filter((wr) => {
+    if (filterAircraftId && wr.aircraftId !== filterAircraftId) return false;
+    if (filterStatus && getVisibleSTStatus(wr.status) !== filterStatus) return false;
+    if (searchText) {
+      const text = [
+        wr.folio,
+        wr.items.map((i) => i.referenceCode).join(','),
+        wr.items.map((i) => i.title).join(','),
+        wr.generalNotes,
+      ].join(' ').toLowerCase();
+      if (!text.includes(searchText)) return false;
+    }
+    return true;
+  });
+
+  const cellPadding = viewDensity === 'compact' ? 'px-3 py-2' : 'px-3 py-3';
+  const actionsGap = viewDensity === 'compact' ? 'gap-1' : 'gap-1.5';
+
+  return (
+    <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+      <table className="min-w-full text-xs">
+        <thead className="bg-slate-50/90 border-b border-slate-200">
+          <tr>
+            <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-500">N° ST</th>
+            <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-500">Fecha</th>
+            <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-500">Aeronave</th>
+            <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-500">Origen</th>
+            <th className="px-3 py-2.5 text-center text-[11px] font-semibold uppercase tracking-wide text-slate-500">Items</th>
+            <th className="px-3 py-2.5 text-center text-[11px] font-semibold uppercase tracking-wide text-slate-500">Prioridad</th>
+            <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-500">Estado</th>
+            <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-500">Actualizada</th>
+            <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-500">Acciones</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {filtered.map((wr) => (
+            <tr key={wr.id} className="hover:bg-slate-50/70 transition-colors">
+              <td className={`${cellPadding} font-mono text-slate-800`}>{wr.folio}</td>
+              <td className={`${cellPadding} text-slate-600`}>{wr.createdAt.slice(0, 10)}</td>
+              <td className={`${cellPadding} text-slate-700`}>{wr.aircraftId}</td>
+              <td className={`${cellPadding} text-slate-600`}>{getOriginLabel(wr.items.map((i) => i.sourceKind))}</td>
+              <td className={`${cellPadding} text-center font-semibold text-slate-700`}>{wr.items.length}</td>
+              <td className={`${cellPadding} text-center capitalize text-slate-700`}>{wr.priority}</td>
+              <td className={cellPadding}><WorkRequestBadge status={wr.status} /></td>
+              <td className={`${cellPadding} text-slate-600`}>{wr.updatedAt.slice(0, 10)}</td>
+              <td className={cellPadding}>
+                <div className={`flex flex-wrap ${actionsGap}`}>
+                  <button className="btn-xs btn-primary inline-flex items-center justify-center gap-1 text-center" onClick={() => selectWorkRequest(wr.id, 'general')}>
+                    <FolderOpen size={11} /> Abrir
+                  </button>
+                  <button
+                    className="btn-xs btn-outline inline-flex items-center justify-center text-center"
+                    onClick={() => selectWorkRequest(wr.id, 'general')}
+                    disabled={getVisibleSTStatus(wr.status) !== 'borrador'}
+                    title={getVisibleSTStatus(wr.status) !== 'borrador' ? 'Solo disponible en borrador' : 'Abrir borrador'}
+                  >
+                    Abrir borrador
+                  </button>
+                  <button
+                    className="btn-xs btn-outline inline-flex items-center justify-center text-center"
+                    onClick={() => selectWorkRequest(wr.id, 'general')}
+                    disabled={getVisibleSTStatus(wr.status) !== 'borrador'}
+                    title={getVisibleSTStatus(wr.status) !== 'borrador' ? 'Solo editable en Borrador' : 'Editar ST'}
+                  >
+                    Editar
+                  </button>
+                  <button
+                    className="btn-xs btn-outline inline-flex items-center justify-center text-center"
+                    onClick={() => handleSend(wr.id)}
+                    disabled={getVisibleSTStatus(wr.status) !== 'borrador'}
+                    title={getVisibleSTStatus(wr.status) !== 'borrador' ? 'Solo se puede enviar en Borrador' : 'Enviar ST'}
+                  >
+                    Enviar
+                  </button>
+                  <button className="btn-xs btn-outline inline-flex items-center justify-center text-center" onClick={() => handleDownloadPdf(wr.id)}>Descargar PDF</button>
+                  <button className="btn-xs btn-outline inline-flex items-center justify-center text-center" onClick={() => selectWorkRequest(wr.id, 'history')}>Ver historial</button>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {filtered.length === 0 && (
+        <div className="py-12 px-4 text-center">
+          <div className="mx-auto w-12 h-12 rounded-xl bg-slate-100 flex items-center justify-center mb-3">
+            <SearchX size={18} className="text-slate-500" />
+          </div>
+          <p className="text-sm font-semibold text-slate-700">No encontramos solicitudes con ese filtro</p>
+          <p className="text-xs text-slate-500 mt-1">Prueba limpiando los filtros para ver toda la bandeja.</p>
+          <button
+            className="btn-xs btn-outline mt-4 inline-flex items-center justify-center text-center"
+            onClick={() => {
+              setFilterAircraftId(null);
+              setFilterStatus(null);
+              setSearchText('');
+            }}
+          >
+            Limpiar filtros
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}

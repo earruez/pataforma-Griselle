@@ -102,6 +102,46 @@ enum WorkOrderStatus {
   @@map("work_order_status")
 }
 
+/// Work order assignment lifecycle — tracks technician assignment and evidence
+enum WorkOrderAssignmentStatus {
+  PENDING              // Esperando asignación de técnico
+  ASSIGNED             // Técnico asignado, pendiente de ejecución
+  IN_PROGRESS          // En ejecución por técnico
+  AWAITING_EVIDENCE    // Ejecución completada, esperando foto/PDF
+  EVIDENCE_UPLOADED    // Fotografía/PDF recibida
+  CLOSED               // OT cerrada y finalizada
+
+  @@map("work_order_assignment_status")
+}
+
+/// Type of evidence file attached to work order
+enum WorkOrderEvidenceType {
+  PHOTO     // Fotografía digital del trabajo firmado
+  PDF       // Documento PDF firmado digitalmente
+  BOTH      // Foto y PDF adjuntos
+
+  @@map("work_order_evidence_type")
+}
+
+/// Work request (Solicitud de Trabajo / ST) lifecycle
+enum WorkRequestStatus {
+  DRAFT       // Borrador editable
+  SENT        // Enviada al responsable CMA/OT
+  CANCELLED   // Cancelada
+
+  @@map("work_request_status")
+}
+
+enum WorkRequestItemCategory {
+  MAINTENANCE_PLAN
+  NORMATIVE
+  COMPONENT_INSPECTION
+  DISCREPANCY
+  OTHER
+
+  @@map("work_request_item_category")
+}
+
 enum DiscrepancyStatus {
   OPEN          // Hallazgo abierto, pendiente de acción
   DEFERRED      // Diferido con referencia MEL/CDL
@@ -152,7 +192,9 @@ model Organization {
   maintenanceTasks   MaintenanceTask[]
   compliances        Compliance[]
   workOrders         WorkOrder[]
+  workRequests       WorkRequest[]
   discrepancies      Discrepancy[]
+  maintenanceTemplates MaintenanceTemplate[]
 
   @@map("organizations")
 }
@@ -188,10 +230,14 @@ model User {
   compliancesInspected  Compliance[]    @relation("InspectedBy")
 
   workOrdersCreated        WorkOrder[]    @relation("WOCreatedBy")
-  workOrdersAssigned       WorkOrder[]    @relation("WOAssignedTo")
+  workOrdersAssignedTechnician WorkOrder[] @relation("WOAssignedTechnician")
   workOrdersInspecting     WorkOrder[]    @relation("WOInspector")
   workOrdersClosed         WorkOrder[]    @relation("WOClosedBy")
+  workOrdersEvidenceUploaded WorkOrder[]   @relation("WOEvidenceUploadedBy")
   workOrderTasksCompleted  WorkOrderTask[] @relation("WOTaskCompletedBy")
+  workRequestsCreated      WorkRequest[]   @relation("WRCreatedBy")
+  workRequestsResponsible  WorkRequest[]   @relation("WRResponsible")
+  workRequestsSentBy       WorkRequest[]   @relation("WRSentBy")
   discrepanciesFound       Discrepancy[]  @relation("DiscrepancyFoundBy")
   discrepanciesResolved    Discrepancy[]  @relation("DiscrepancyResolvedBy")
   componentMovements       ComponentHistory[] @relation("ComponentMovedBy")
@@ -250,6 +296,7 @@ model Aircraft {
   applicableTasks    AircraftTask[]
   compliances        Compliance[]
   workOrders         WorkOrder[]
+  workRequests       WorkRequest[]
   componentHistory   ComponentHistory[]
 
   // Indexes for common lookups
@@ -334,6 +381,7 @@ model Component {
   applicableTasks ComponentTask[]
   compliances     Compliance[]
   history         ComponentHistory[]
+  workRequestItems WorkRequestItem[]
 
   @@unique([serialNumber, organizationId])
   @@index([organizationId])
@@ -371,6 +419,9 @@ model MaintenanceTask {
 
   /// Primary interval in calendar days (e.g. 365 for annual)
   intervalCalendarDays Int?
+
+  /// Primary interval in calendar months (e.g. 6 for semestral)
+  intervalCalendarMonths Int?
 
   // ── Tolerances (grace period before task becomes overdue) ──────────────────
 
@@ -414,6 +465,7 @@ model MaintenanceTask {
 
   compliances     Compliance[]
   workOrderTasks  WorkOrderTask[]
+  workRequestItems WorkRequestItem[]
 
   @@unique([code, organizationId])
   @@index([organizationId])
@@ -577,6 +629,29 @@ model WorkOrder {
   actualStartDate  DateTime?
   actualEndDate    DateTime?
 
+  // ── Assignment workflow ────────────────────────────────────────────────────
+  /// Tracks assignment status separately from main WorkOrderStatus
+  assignmentStatus WorkOrderAssignmentStatus @default(PENDING)
+
+  /// Timestamp when technician was assigned
+  assignedAt          DateTime?
+
+  // ── Evidencia y cierre ─────────────────────────────────────────────────────
+  /// File URL for evidence (photo, signed PDF) — stored in S3/bucket
+  evidenceFileUrl     String?    @db.VarChar(500)
+
+  /// Original filename of evidence
+  evidenceFileName    String?    @db.VarChar(255)
+
+  /// When evidence was uploaded
+  evidenceUploadedAt  DateTime?
+
+  /// Who uploaded the evidence (usually the technician)
+  evidenceUploadedBy  String?    @db.Uuid
+
+  /// Type of evidence file
+  evidenceType        WorkOrderEvidenceType?
+
   // ── Aircraft state snapshot at open/close ─────────────────────────────────
   aircraftHoursAtOpen    Decimal?   @db.Decimal(10, 2)
   aircraftCyclesAtOpen   Int?
@@ -596,8 +671,9 @@ model WorkOrder {
   organization         Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   aircraft             Aircraft        @relation(fields: [aircraftId], references: [id])
   createdBy            User            @relation("WOCreatedBy",    fields: [createdById],            references: [id])
-  assignedTechnician   User?           @relation("WOAssignedTo",   fields: [assignedTechnicianId],   references: [id])
+  assignedTechnician   User?           @relation("WOAssignedTechnician", fields: [assignedTechnicianId], references: [id])
   inspector            User?           @relation("WOInspector",    fields: [inspectorId],            references: [id])
+  evidenceUploadedByUser User?         @relation("WOEvidenceUploadedBy", fields: [evidenceUploadedBy], references: [id])
   closedBy             User?           @relation("WOClosedBy",     fields: [closedById],             references: [id])
 
   tasks                WorkOrderTask[]
@@ -609,6 +685,8 @@ model WorkOrder {
   @@index([organizationId])
   @@index([aircraftId])
   @@index([status, organizationId])
+  @@index([assignmentStatus])
+  @@index([assignedTechnicianId])
   @@index([createdById])
   @@map("work_orders")
 }
@@ -636,6 +714,84 @@ model WorkOrderTask {
   @@index([workOrderId])
   @@index([taskId])
   @@map("work_order_tasks")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  WORK REQUEST  (Solicitud de Trabajo / ST)
+//  Editable container that can group multiple maintenance tasks before dispatch
+// ─────────────────────────────────────────────────────────────────────────────
+
+model WorkRequest {
+  id             String            @id @default(uuid()) @db.Uuid
+  organizationId String            @db.Uuid
+  aircraftId     String            @db.Uuid
+
+  /// Sequential ST number scoped to org (e.g. ST-2026-0001)
+  number         String            @db.VarChar(50)
+
+  status         WorkRequestStatus @default(DRAFT)
+
+  /// User who created/assembled the request
+  createdById    String            @db.Uuid
+
+  /// Responsible user in CMA / Oficina Tecnica
+  responsibleId  String?           @db.Uuid
+
+  /// Snapshot values captured at ST creation
+  aircraftHoursAtRequest Decimal?  @db.Decimal(10, 2)
+  aircraftCyclesN1       Int?
+  aircraftCyclesN2       Int?
+
+  /// Dispatch tracking
+  sentAt         DateTime?
+  sentById       String?           @db.Uuid
+
+  notes          String?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  aircraft       Aircraft          @relation(fields: [aircraftId], references: [id])
+  createdBy      User              @relation("WRCreatedBy", fields: [createdById], references: [id])
+  responsible    User?             @relation("WRResponsible", fields: [responsibleId], references: [id])
+  sentBy         User?             @relation("WRSentBy", fields: [sentById], references: [id])
+
+  items          WorkRequestItem[]
+
+  @@unique([number, organizationId])
+  @@index([organizationId, status])
+  @@index([aircraftId, status])
+  @@index([responsibleId])
+  @@map("work_requests")
+}
+
+/// Join table for WorkRequest <-> MaintenanceTask (M:N)
+model WorkRequestItem {
+  id            String          @id @default(uuid()) @db.Uuid
+  workRequestId String          @db.Uuid
+  taskId        String?         @db.Uuid
+  componentId   String?         @db.Uuid
+  discrepancyId String?         @db.Uuid
+
+  category      WorkRequestItemCategory @default(MAINTENANCE_PLAN)
+  itemCode      String?         @db.VarChar(100)
+  itemTitle     String          @db.VarChar(255)
+  itemDescription String?
+
+  /// Why this task was added (AUTO threshold / manual grouping)
+  source        String          @default("AUTO") @db.VarChar(20)
+  addedAt       DateTime        @default(now())
+
+  workRequest   WorkRequest     @relation(fields: [workRequestId], references: [id], onDelete: Cascade)
+  task          MaintenanceTask? @relation(fields: [taskId], references: [id])
+  component     Component?      @relation(fields: [componentId], references: [id])
+  discrepancy   Discrepancy?    @relation(fields: [discrepancyId], references: [id])
+
+  @@index([workRequestId, category])
+  @@index([taskId])
+  @@index([componentId])
+  @@index([discrepancyId])
+  @@map("work_request_items")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -679,6 +835,7 @@ model Discrepancy {
   workOrder      WorkOrder         @relation(fields: [workOrderId],    references: [id], onDelete: Cascade)
   foundBy        User              @relation("DiscrepancyFoundBy",     fields: [foundById],     references: [id])
   resolvedBy     User?             @relation("DiscrepancyResolvedBy",  fields: [resolvedById],  references: [id])
+  workRequestItems WorkRequestItem[]
 
   @@index([workOrderId])
   @@index([organizationId, status])
@@ -779,4 +936,119 @@ model ComponentHistory {
   @@index([organizationId])
   @@index([workOrderId])
   @@map("component_history")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  MAINTENANCE TEMPLATE  (Biblioteca Maestra de Mantenimiento)
+//  Almacena planes estándar por Fabricante/Modelo para reutilizar en nuevas aeronaves
+// ─────────────────────────────────────────────────────────────────────────────
+
+model MaintenanceTemplate {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @db.Uuid
+
+  /// Aircraft manufacturer (e.g. "Airbus", "Boeing", "Beechcraft")
+  manufacturer   String   @db.VarChar(150)
+
+  /// Aircraft model (e.g. "AS350 B3", "737-800", "Twin Otter")
+  model          String   @db.VarChar(150)
+
+  /// Human-readable description of this template
+  description    String?
+
+  /// Version number for tracking changes (e.g. "1.0", "2.1")
+  version        String   @default("1.0") @db.VarChar(20)
+
+  /// Template is available for use when creating new aircraft
+  isActive       Boolean  @default(true)
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // Relations
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  tasks          MaintenanceTemplateTask[]
+
+  @@unique([manufacturer, model, organizationId])
+  @@index([organizationId])
+  @@index([manufacturer])
+  @@index([model])
+  @@map("maintenance_templates")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  MAINTENANCE TEMPLATE TASK  (Tareas que forman parte de una plantilla)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model MaintenanceTemplateTask {
+  id         String   @id @default(uuid()) @db.Uuid
+  templateId String   @db.Uuid
+
+  /// Task code — human-readable identifier (e.g. "50H-INSP", "04-10-00", "AD-2024-15")
+  code       String   @db.VarChar(100)
+
+  /// Short title of the task
+  title      String   @db.VarChar(255)
+
+  /// Detailed description of the task
+  description String
+
+  /// AMM/SB chapter classification (e.g. "04-10-00" for Airbus, "32-51-00" for engines)
+  chapter    String?  @db.VarChar(20)
+
+  /// Section/category within chapter (e.g. "ALS", "MSM", "ECS")
+  section    String?  @db.VarChar(50)
+
+  // ── Interval configuration ─────────────────────────────────────────────────
+
+  /// Type of interval control (hours, cycles, calendar, or combination)
+  intervalType       TaskIntervalType
+
+  /// Interval in flight hours (nullable if not applicable)
+  intervalHours      Decimal?        @db.Decimal(10, 2)
+
+  /// Interval in cycles/landings
+  intervalCycles     Int?
+
+  /// Interval in calendar days
+  intervalCalendarDays Int?
+
+  /// Interval in calendar months
+  intervalCalendarMonths Int?
+
+  // ── Regulatory/Reference info ──────────────────────────────────────────────
+
+  /// Reference number (AD#, SB#, etc.)
+  referenceNumber String?        @db.VarChar(100)
+
+  /// Type of reference (AMM, AD, SB, etc.)
+  referenceType   ReferenceType  @default(AMM)
+
+  /// True if regulatory mandatory
+  isMandatory     Boolean        @default(false)
+
+  /// Estimated man-hours to perform
+  estimatedManHours Decimal?     @db.Decimal(6, 2)
+
+  /// True if independent inspection (RII) required after task
+  requiresInspection Boolean     @default(false)
+
+  /// Specific aircraft model applicability (inherited from template)
+  applicableModel String?        @db.VarChar(150)
+
+  /// Specific part number applicability
+  applicablePartNumber String?   @db.VarChar(100)
+
+  // Metadata
+  isActive       Boolean        @default(true)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  // Relations
+  template       MaintenanceTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  @@unique([templateId, code])
+  @@index([templateId])
+  @@index([chapter])
+  @@map("maintenance_template_tasks")
 }

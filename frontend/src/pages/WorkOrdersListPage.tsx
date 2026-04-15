@@ -5,6 +5,7 @@ import { toast } from 'react-hot-toast';
 import {
   ClipboardList, Plus, Search, ChevronDown, Plane, User,
   AlertCircle, Clock, Loader2, CheckCircle2, ShieldCheck, X, Package,
+  Bell,
 } from 'lucide-react';
 import { useAuthStore } from '@store/authStore';
 import { aircraftApi } from '@api/aircraft.api';
@@ -255,6 +256,8 @@ export default function WorkOrdersListPage() {
   const [search, setSearch] = useState('');
   const [filterStatus, setFilterStatus] = useState<WorkOrderStatus | ''>(searchParams.get('status') as WorkOrderStatus | '' ?? '');
   const [filterAircraft, setFilterAircraft] = useState('');
+  const [aircraftSearch, setAircraftSearch] = useState('');
+  const [showAircraftDropdown, setShowAircraftDropdown] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
 
   // Sync URL → filter when navigating here from Dashboard
@@ -267,6 +270,16 @@ export default function WorkOrdersListPage() {
     queryKey: ['aircraft'],
     queryFn: aircraftApi.findAll,
   });
+
+  // Filter aircraft by search term
+  const filteredAircraft = aircraftSearch
+    ? aircraft.filter(a =>
+        a.registration.toLowerCase().includes(aircraftSearch.toLowerCase()) ||
+        a.model.toLowerCase().includes(aircraftSearch.toLowerCase())
+      )
+    : aircraft;
+
+  const selectedAircraft = aircraft.find(a => a.id === filterAircraft);
 
   const { data: workOrders = [], isLoading } = useQuery({
     queryKey: ['work-orders', filterStatus, filterAircraft],
@@ -297,6 +310,16 @@ export default function WorkOrdersListPage() {
 
   const canCreate = user?.role && ['ADMIN', 'SUPERVISOR'].includes(user.role);
 
+  const canManage = user?.role && ['ADMIN', 'SUPERVISOR'].includes(user.role);
+
+  const { data: pendingList = [] } = useQuery({
+    queryKey: ['work-orders-pending-assignment'],
+    queryFn: workOrdersApi.getPendingAssignment,
+    enabled: !!canManage,
+    refetchInterval: 60_000,
+  });
+  const pendingCount = pendingList.length;
+
   return (
     <div className="p-8 space-y-6">
       {/* Header */}
@@ -317,6 +340,132 @@ export default function WorkOrdersListPage() {
           </button>
         )}
       </div>
+
+      {/* Selector de Aeronave Prominente */}
+            {/* Pending Assignment Alert */}
+            {canManage && pendingCount > 0 && (
+              <div className="flex items-center justify-between gap-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
+                <div className="flex items-center gap-2 text-amber-800">
+                  <Bell size={16} className="shrink-0 text-amber-500" />
+                  <span className="text-sm font-medium">
+                    {pendingCount} Orden{pendingCount > 1 ? 'es' : ''} de Trabajo pendiente{pendingCount > 1 ? 's' : ''} de asignación
+                  </span>
+                </div>
+                <button
+                  onClick={() => setFilterStatus('OPEN')}
+                  className="text-xs font-semibold text-amber-700 underline underline-offset-2 hover:text-amber-900 whitespace-nowrap"
+                >
+                  Ver OTs abiertas
+                </button>
+              </div>
+            )}
+
+      <div className="relative">
+        <div className="bg-white rounded-xl border border-slate-200 shadow-card p-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-slate-700 mb-2">Filtrar por Aeronave</p>
+              <div className="relative">
+                <button
+                  onClick={() => setShowAircraftDropdown(!showAircraftDropdown)}
+                  className="w-full flex items-center justify-between gap-3 px-4 py-2.5 border border-slate-200 rounded-lg hover:border-slate-300 transition-colors bg-white focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-inset"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    {selectedAircraft ? (
+                      <>
+                        <Plane size={14} className="text-slate-400 shrink-0" />
+                        <div className="text-left min-w-0">
+                          <p className="font-mono font-bold text-slate-800 text-sm">{selectedAircraft.registration}</p>
+                          <p className="text-xs text-slate-400">{selectedAircraft.model}</p>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <Plane size={14} className="text-slate-400" />
+                        <span className="text-slate-500">Todas las aeronaves</span>
+                      </>
+                    )}
+                  </div>
+                  <ChevronDown size={16} className={`text-slate-400 shrink-0 transition-transform ${showAircraftDropdown ? 'rotate-180' : ''}`} />
+                </button>
+
+                {/* Dropdown con búsqueda */}
+                {showAircraftDropdown && (
+                  <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-slate-200 rounded-xl shadow-lg z-20">
+                    {/* Search input */}
+                    <div className="p-3 border-b border-slate-100">
+                      <div className="relative">
+                        <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                        <input
+                          type="text"
+                          placeholder="Buscar matrícula o modelo…"
+                          value={aircraftSearch}
+                          onChange={e => setAircraftSearch(e.target.value)}
+                          autoFocus
+                          className="filter-input pl-8 w-full"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Aircraft list */}
+                    <div className="max-h-64 overflow-y-auto">
+                      {/* Opción "Todas" */}
+                      <button
+                        onClick={() => {
+                          setFilterAircraft('');
+                          setAircraftSearch('');
+                          setShowAircraftDropdown(false);
+                        }}
+                        className={`w-full text-left px-4 py-2.5 hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-100 ${
+                          !filterAircraft ? 'bg-brand-50 font-semibold text-brand-700' : 'text-slate-700'
+                        }`}
+                      >
+                        <Plane size={12} className={!filterAircraft ? 'text-brand-600' : 'text-slate-400'} />
+                        <span>Todas las aeronaves</span>
+                      </button>
+
+                      {/* Aircraft options */}
+                      {filteredAircraft.length > 0 ? (
+                        filteredAircraft.map(a => (
+                          <button
+                            key={a.id}
+                            onClick={() => {
+                              setFilterAircraft(a.id);
+                              setAircraftSearch('');
+                              setShowAircraftDropdown(false);
+                            }}
+                            className={`w-full text-left px-4 py-2.5 hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-100 last:border-0 ${
+                              filterAircraft === a.id ? 'bg-brand-50 font-semibold text-brand-700' : 'text-slate-700'
+                            }`}
+                          >
+                            <Plane size={12} className={filterAircraft === a.id ? 'text-brand-600' : 'text-slate-400'} />
+                            <div className="min-w-0">
+                              <p className="font-mono font-bold text-sm">{a.registration}</p>
+                              <p className="text-xs text-slate-400">{a.model}</p>
+                            </div>
+                          </button>
+                        ))
+                      ) : (
+                        <div className="px-4 py-3 text-center text-slate-400 text-sm">
+                          No se encontraron aeronaves
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Close dropdown when clicking outside */}
+      {showAircraftDropdown && (
+        <div
+          className="fixed inset-0 z-10"
+          onClick={() => setShowAircraftDropdown(false)}
+        />
+      )}
 
       {/* Status summary cards */}
       <div className="grid grid-cols-5 gap-3">
@@ -349,22 +498,11 @@ export default function WorkOrdersListPage() {
           <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
           <input
             type="text"
-            placeholder="Buscar OT, aeronave…"
+            placeholder="Buscar OT o título…"
             value={search}
             onChange={e => setSearch(e.target.value)}
             className="filter-input pl-8 w-48"
           />
-        </div>
-        <div className="relative">
-          <select
-            value={filterAircraft}
-            onChange={e => setFilterAircraft(e.target.value)}
-            className="filter-input pr-8 appearance-none cursor-pointer"
-          >
-            <option value="">Todas las aeronaves</option>
-            {aircraft.map(a => <option key={a.id} value={a.id}>{a.registration}</option>)}
-          </select>
-          <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
         </div>
         <div className="relative">
           <select
@@ -397,7 +535,6 @@ export default function WorkOrdersListPage() {
             <tr>
               <th className="table-header w-32">N° OT</th>
               <th className="table-header">Título</th>
-              <th className="table-header">Aeronave</th>
               <th className="table-header">Estado</th>
               <th className="table-header">Técnico</th>
               <th className="table-header">Inspector</th>
@@ -411,7 +548,7 @@ export default function WorkOrdersListPage() {
           <tbody className="divide-y divide-slate-100">
             {isLoading && (
               <tr>
-                <td colSpan={11} className="table-cell text-center text-slate-400 py-12">
+                <td colSpan={10} className="table-cell text-center text-slate-400 py-12">
                   <Loader2 size={18} className="inline animate-spin mr-2" />
                   Cargando órdenes…
                 </td>
@@ -419,7 +556,7 @@ export default function WorkOrdersListPage() {
             )}
             {!isLoading && filtered.length === 0 && (
               <tr>
-                <td colSpan={11} className="table-cell text-center text-slate-400 py-12">
+                <td colSpan={10} className="table-cell text-center text-slate-400 py-12">
                   No hay órdenes de trabajo
                 </td>
               </tr>
@@ -432,13 +569,6 @@ export default function WorkOrdersListPage() {
                 <tr key={wo.id} className="hover:bg-slate-50 transition-colors">
                   <td className="table-cell font-mono font-bold text-slate-800 whitespace-nowrap">{wo.number}</td>
                   <td className="table-cell font-medium text-slate-700 max-w-xs truncate">{wo.title}</td>
-                  <td className="table-cell">
-                    <div className="flex items-center gap-1.5">
-                      <Plane size={12} className="text-slate-400" />
-                      <span className="font-mono font-semibold text-slate-800">{wo.aircraft.registration}</span>
-                      <span className="text-xs text-slate-400">{wo.aircraft.model}</span>
-                    </div>
-                  </td>
                   <td className="table-cell">
                     <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold ${STATUS_COLORS[wo.status]}`}>
                       <Icon size={10} />

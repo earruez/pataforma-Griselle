@@ -99,6 +99,23 @@ function toInt(val: string): number | null {
   return isNaN(n) ? null : n;
 }
 
+function parseCalendarLimit(raw: string): { months: number | null; days: number | null } {
+  if (!raw) return { months: null, days: null };
+  const value = raw.trim().toUpperCase();
+  const num = toFloat(value.replace(/[^0-9.,-]/g, ''));
+  if (num == null) return { months: null, days: null };
+
+  if (/\bM\b|MONTH|MESE|MES/.test(value)) {
+    return { months: Math.round(num), days: null };
+  }
+  if (/\bD\b|DAY|DIA|DIAS/.test(value)) {
+    return { months: null, days: Math.round(num) };
+  }
+
+  // If unit is not explicit, keep it as days to avoid aggressive month assumptions.
+  return { months: null, days: Math.round(num) };
+}
+
 /**
  * Parsea fechas en múltiples formatos comunes de Access/Excel:
  *   DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD, MM/DD/YYYY, D/M/YY
@@ -299,10 +316,24 @@ async function migrateTasks(rows: CsvTarea[]): Promise<{
 
     const title       = get(row, 'TITULO', 'Titulo', 'TITLE', 'title') || code;
     const description = get(row, 'DESCRIPCION', 'Descripcion', 'description') || title;
-    const intervalType = mapIntervalType(get(row, 'TIPO', 'Tipo', 'intervalType', 'INTERVALO') || 'HORAS');
-    const intervalHours   = toFloat(get(row, 'INT_HORAS', 'IntHoras', 'intervalHours', 'INTHORAS'));
+    const mappedIntervalType = mapIntervalType(get(row, 'TIPO', 'Tipo', 'intervalType', 'INTERVALO') || 'HORAS');
+    const csvLimit1 = toFloat(get(row, 'LIMIT_1', 'LIMIT 1', 'Limit 1', 'Limit1', 'LIM1'));
+    const csvLimit2 = parseCalendarLimit(get(row, 'LIMIT_2', 'LIMIT 2', 'Limit 2', 'Limit2', 'LIM2'));
+
+    const intervalHours   = toFloat(get(row, 'INT_HORAS', 'IntHoras', 'intervalHours', 'INTHORAS')) ?? csvLimit1;
     const intervalCycles  = toInt(get(row, 'INT_CICLOS', 'IntCiclos', 'intervalCycles', 'INTCICLOS'));
-    const intervalDays    = toInt(get(row, 'INT_DIAS', 'IntDias', 'intervalCalendarDays', 'INTDIAS'));
+    const intervalDays    = toInt(get(row, 'INT_DIAS', 'IntDias', 'intervalCalendarDays', 'INTDIAS')) ?? csvLimit2.days;
+    const intervalMonths  = toInt(get(row, 'INT_MESES', 'IntMeses', 'intervalCalendarMonths', 'INTMESES', 'intervaloMeses')) ?? csvLimit2.months;
+
+    const hasLimit1 = intervalHours != null;
+    const hasLimit2 = intervalDays != null || intervalMonths != null;
+    const intervalType = hasLimit1 && hasLimit2
+      ? 'FLIGHT_HOURS_OR_CALENDAR'
+      : hasLimit1
+        ? 'FLIGHT_HOURS'
+        : hasLimit2
+          ? 'CALENDAR_DAYS'
+          : mappedIntervalType;
     const toleranceHours  = toFloat(get(row, 'TOL_HORAS', 'TolHoras', 'toleranceHours'));
     const refNumber       = get(row, 'REF_NUMERO', 'RefNumero', 'referenceNumber', 'REFNUMERO') || undefined;
     const refType         = mapRefType(get(row, 'REF_TIPO', 'RefTipo', 'referenceType', 'REFTIPO') || 'AMM');
@@ -327,6 +358,7 @@ async function migrateTasks(rows: CsvTarea[]): Promise<{
           intervalHours:       intervalHours   ? new Prisma.Decimal(intervalHours)  : undefined,
           intervalCycles:      intervalCycles  ?? undefined,
           intervalCalendarDays: intervalDays   ?? undefined,
+          intervalCalendarMonths: intervalMonths ?? undefined,
           toleranceHours:      toleranceHours  ? new Prisma.Decimal(toleranceHours) : undefined,
           referenceNumber:     refNumber,
           referenceType:       refType,
@@ -342,6 +374,7 @@ async function migrateTasks(rows: CsvTarea[]): Promise<{
           intervalHours:       intervalHours   ? new Prisma.Decimal(intervalHours)  : undefined,
           intervalCycles:      intervalCycles  ?? undefined,
           intervalCalendarDays: intervalDays   ?? undefined,
+          intervalCalendarMonths: intervalMonths ?? undefined,
           referenceNumber:     refNumber,
           isMandatory,
         },

@@ -1,13 +1,17 @@
 import { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import { toast } from 'react-hot-toast';
-import { Plane, X, Loader2, AlertTriangle, ChevronDown, ChevronRight, Clock, TrendingDown, Info } from 'lucide-react';
+import { Plane, X, Loader2, AlertTriangle, ChevronDown, ChevronRight, Clock, TrendingDown, Info, FileText, User } from 'lucide-react';
 import { aircraftApi, type Aircraft, type CreateAircraftInput } from '@api/aircraft.api';
+import { libraryApi } from '@api/library.api';
 import { maintenancePlanApi, type MaintenancePlanItem } from '@api/maintenancePlan.api';
+import { AircraftStatusReport } from '@components/reports/AircraftStatusReport';
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const DAILY_HOURS    = 2.5;  // assumed flight hours per day (avg)
+const DAILY_HOURS    = 2;    // assumed flight hours per day (avg)
+const MS_PER_DAY     = 24 * 60 * 60 * 1000;
 const ALERT_HOURS    = 15;   // < 15h remaining → orange badge
 const CRITICAL_HOURS = 5;    // < 5h remaining  → red + blink
 const ALERT_DAYS     = 15;   // < 15d remaining → orange badge
@@ -33,6 +37,7 @@ const STATUS_LABEL: Record<string, string> = {
 
 function NewAircraftModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
+  const [selectedTemplateId, setSelectedTemplateId] = useState('');
   const [form, setForm] = useState<CreateAircraftInput>({
     registration: '',
     manufacturer: '',
@@ -43,10 +48,28 @@ function NewAircraftModal({ onClose }: { onClose: () => void }) {
     engineCount: 2,
   });
 
+  const { data: templates = [] } = useQuery({
+    queryKey: ['library-templates-for-aircraft-create'],
+    queryFn: libraryApi.findAll,
+    staleTime: 5 * 60 * 1000,
+  });
+
   const mutation = useMutation({
-    mutationFn: aircraftApi.create,
-    onSuccess: () => {
-      toast.success('Aeronave creada correctamente');
+    mutationFn: async () => {
+      const aircraft = await aircraftApi.create(form);
+      if (!selectedTemplateId) {
+        return { aircraft, tasksCloned: 0, templateApplied: false };
+      }
+
+      const clone = await libraryApi.cloneToAircraft(selectedTemplateId, aircraft.id);
+      return { aircraft, tasksCloned: clone.tasksCloned, templateApplied: true };
+    },
+    onSuccess: ({ templateApplied, tasksCloned }) => {
+      if (templateApplied) {
+        toast.success(`Aeronave creada y plan asignado (${tasksCloned} tareas)`);
+      } else {
+        toast.success('Aeronave creada correctamente');
+      }
       qc.invalidateQueries({ queryKey: ['aircraft'] });
       onClose();
     },
@@ -65,7 +88,7 @@ function NewAircraftModal({ onClose }: { onClose: () => void }) {
       toast.error('Matrícula, Marca, Modelo y N/S son obligatorios');
       return;
     }
-    mutation.mutate(form);
+    mutation.mutate();
   }
 
   return (
@@ -175,6 +198,24 @@ function NewAircraftModal({ onClose }: { onClose: () => void }) {
             </div>
           </div>
 
+          <div>
+            <label className="form-label">Plan de Mantenimiento (Biblioteca)</label>
+            <select
+              value={selectedTemplateId}
+              onChange={e => setSelectedTemplateId(e.target.value)}
+              className="filter-input w-full"
+            >
+              <option value="">Sin asignar por ahora</option>
+              {templates
+                .filter(t => t.isActive)
+                .map(t => (
+                  <option key={t.id} value={t.id}>
+                    {t.manufacturer} {t.model} - {t.description ?? t.version}
+                  </option>
+                ))}
+            </select>
+          </div>
+
           <div className="flex justify-end gap-2 pt-2">
             <button type="button" onClick={onClose} className="btn-secondary">Cancelar</button>
             <button
@@ -200,6 +241,8 @@ interface CriticalTask {
   intervalType: string;
   hoursRemaining: number | null;
   daysRemaining: number | null;
+  nextDueDate: Date | null;
+  dueBy: 'HOURS' | 'CALENDAR' | null;
   /** Urgency expressed in days — min of hours→days and calendar days */
   urgencyDays: number;
   status: string;
@@ -225,6 +268,8 @@ function getCriticalTasks(plan: MaintenancePlanItem[]): CriticalTask[] {
         intervalType: item.intervalType,
         hoursRemaining: item.hoursRemaining,
         daysRemaining: item.daysRemaining,
+        nextDueDate: item.nextDueDate ? new Date(item.nextDueDate) : null,
+        dueBy: item.dueBy,
         urgencyDays: urgencyDays === Infinity ? 99999 : urgencyDays,
         status: item.status,
       };
@@ -233,10 +278,22 @@ function getCriticalTasks(plan: MaintenancePlanItem[]): CriticalTask[] {
     .slice(0, 5);
 }
 
-/** Projects the calendar date when hours will be exhausted at DAILY_HOURS/day */
-function calculateEstimatedDate(hoursRemaining: number): Date {
-  const daysUntil = hoursRemaining / DAILY_HOURS;
-  return new Date(Date.now() + daysUntil * 24 * 60 * 60 * 1000);
+/**
+ * Projects real Next Due using dual limits.
+ * - Hours-only: projected by DAILY_HOURS/day.
+ * - Calendar-only: uses exact due date.
+ * - Dual: earliest date wins.
+ */
+function calculateEstimatedDate(task: CriticalTask): Date | null {
+  const hoursDate = task.hoursRemaining != null
+    ? new Date(Date.now() + (task.hoursRemaining / DAILY_HOURS) * MS_PER_DAY)
+    : null;
+
+  const calendarDate = task.nextDueDate ??
+    (task.daysRemaining != null ? new Date(Date.now() + task.daysRemaining * MS_PER_DAY) : null);
+
+  if (hoursDate && calendarDate) return hoursDate <= calendarDate ? hoursDate : calendarDate;
+  return calendarDate ?? hoursDate;
 }
 
 type AlertTier = 'overdue' | 'critical' | 'warning' | 'ok';
@@ -317,11 +374,12 @@ function ProjectionPanel({ aircraft }: { aircraft: Aircraft }) {
           </thead>
           <tbody className="divide-y divide-slate-100 bg-white">
             {critical.map(t => {
+              const projectedDueDate = calculateEstimatedDate(t);
               const rowTier = getAlertTier(t);
               // Which criterion is driving urgency?
               const hoursAsDays = t.hoursRemaining != null ? t.hoursRemaining / DAILY_HOURS : Infinity;
               const calDays     = t.daysRemaining  != null ? t.daysRemaining                : Infinity;
-              const controlledByHours = hoursAsDays <= calDays;
+              const controlledByHours = t.dueBy != null ? t.dueBy === 'HOURS' : hoursAsDays <= calDays;
               return (
                 <tr key={t.code} className={
                   rowTier === 'overdue'  ? 'bg-rose-50' :
@@ -356,8 +414,8 @@ function ProjectionPanel({ aircraft }: { aircraft: Aircraft }) {
                   </td>
                   {/* estimated calendar date based on hours */}
                   <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-500">
-                    {t.hoursRemaining != null && t.hoursRemaining > 0
-                      ? calculateEstimatedDate(t.hoursRemaining).toLocaleDateString('es-MX')
+                    {projectedDueDate
+                      ? projectedDueDate.toLocaleDateString('es-MX')
                       : <span className="text-slate-300">—</span>}
                   </td>
                   {/* calendar days remaining */}
@@ -377,9 +435,7 @@ function ProjectionPanel({ aircraft }: { aircraft: Aircraft }) {
                     <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
                       controlledByHours ? 'bg-blue-50 text-blue-600' : 'bg-purple-50 text-purple-600'
                     }`}>
-                      {controlledByHours
-                        ? `~${Math.max(0, Math.round(hoursAsDays))}d (horas)`
-                        : `${Math.max(0, Math.round(calDays))}d (fecha)`}
+                      {controlledByHours ? 'Vence por Horas' : 'Vence por Calendario'}
                     </span>
                   </td>
                   <td className="px-3 py-2">
@@ -410,6 +466,8 @@ function StatusPill({ status }: { status: 'OVERDUE' | 'DUE_SOON' | 'OK' | 'NEVER
 
 function AircraftRow({ aircraft }: { aircraft: Aircraft }) {
   const [expanded, setExpanded] = useState(false);
+  const [showStatusReport, setShowStatusReport] = useState(false);
+  const navigate = useNavigate();
 
   // Lightweight pre-fetch to show alert dot — only triggers once mounted
   const { data: plan = [] } = useQuery({
@@ -446,10 +504,10 @@ function AircraftRow({ aircraft }: { aircraft: Aircraft }) {
           <div className="flex items-center gap-1.5">
             <span className="font-mono font-bold text-slate-900">{aircraft.registration}</span>
             {(tier === 'overdue' || tier === 'critical') && (
-              <AlertTriangle size={13} className="text-rose-500 animate-pulse shrink-0" title={tier === 'overdue' ? 'Tarea vencida' : '< 5h — vencimiento crítico'} />
+              <AlertTriangle size={13} className="text-rose-500 animate-pulse shrink-0" />
             )}
             {tier === 'warning' && (
-              <AlertTriangle size={13} className="text-amber-500 animate-pulse shrink-0" title="< 15h para vencimiento" />
+              <AlertTriangle size={13} className="text-amber-500 animate-pulse shrink-0" />
             )}
           </div>
         </td>
@@ -481,9 +539,9 @@ function AircraftRow({ aircraft }: { aircraft: Aircraft }) {
                     : `~${Math.round(nearest.urgencyDays)}d`}
                 </span>
               </div>
-              {nearest.hoursRemaining != null && nearest.hoursRemaining > 0 && (
+              {calculateEstimatedDate(nearest) && (
                 <span className="text-[10px] text-slate-400 tabular-nums">
-                  {calculateEstimatedDate(nearest.hoursRemaining).toLocaleDateString('es-MX')}
+                  {calculateEstimatedDate(nearest)?.toLocaleDateString('es-MX')}
                 </span>
               )}
             </div>
@@ -500,15 +558,47 @@ function AircraftRow({ aircraft }: { aircraft: Aircraft }) {
             {STATUS_LABEL[aircraft.status] ?? aircraft.status}
           </span>
         </td>
+        <td className="table-cell">
+          <div className="flex items-center gap-1.5">
+            <button
+              className="btn-secondary inline-flex items-center gap-1 text-xs"
+              onClick={(e) => {
+                e.stopPropagation();
+                navigate(`/aircraft/${aircraft.id}`);
+              }}
+            >
+              <User size={12} /> Ficha
+            </button>
+            <button
+              className="btn-secondary inline-flex items-center gap-1 text-xs"
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowStatusReport(true);
+              }}
+            >
+              <FileText size={12} /> Reporte DGAC
+            </button>
+          </div>
+        </td>
       </tr>
 
       {/* Expandable projection row */}
       {expanded && (
         <tr>
-          <td colSpan={10} className="p-0">
+          <td colSpan={11} className="p-0">
             <ProjectionPanel aircraft={aircraft} />
           </td>
         </tr>
+      )}
+
+      {showStatusReport && (
+        <AircraftStatusReport
+          aircraftId={aircraft.id}
+          registration={aircraft.registration}
+          model={aircraft.model}
+          currentHours={Number(aircraft.totalFlightHours)}
+          onClose={() => setShowStatusReport(false)}
+        />
       )}
     </>
   );
@@ -559,17 +649,18 @@ export default function AircraftPage() {
               <th className="table-header text-right">Próx. tarea</th>
               <th className="table-header">Vto. CdN</th>
               <th className="table-header">Estado</th>
+              <th className="table-header">Perfil</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {isLoading && (
               <tr>
-                <td colSpan={10} className="table-cell text-center text-slate-400 py-12">Cargando…</td>
+                <td colSpan={11} className="table-cell text-center text-slate-400 py-12">Cargando…</td>
               </tr>
             )}
             {!isLoading && aircraft.length === 0 && (
               <tr>
-                <td colSpan={10} className="table-cell text-center text-slate-400 py-12">No hay aeronaves registradas</td>
+                <td colSpan={11} className="table-cell text-center text-slate-400 py-12">No hay aeronaves registradas</td>
               </tr>
             )}
             {aircraft.map((a) => (

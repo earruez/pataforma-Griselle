@@ -14,6 +14,10 @@ export interface IComponentRepository {
       Pick<
         Component,
         | 'aircraftId'
+        | 'partNumber'
+        | 'serialNumber'
+        | 'description'
+        | 'manufacturer'
         | 'position'
         | 'status'
         | 'totalHoursSinceNew'

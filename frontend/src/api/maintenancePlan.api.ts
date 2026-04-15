@@ -1,6 +1,7 @@
 import { apiClient } from './client';
 
 export type PlanItemStatus = 'OVERDUE' | 'DUE_SOON' | 'OK' | 'NEVER_PERFORMED';
+export type DueByType = 'HOURS' | 'CALENDAR';
 
 export interface MaintenancePlanItem {
   taskId: string;
@@ -10,6 +11,7 @@ export interface MaintenancePlanItem {
   intervalHours: number | null;
   intervalCycles: number | null;
   intervalCalendarDays: number | null;
+  intervalCalendarMonths: number | null;
   referenceType: string;
   referenceNumber: string | null;
   isMandatory: boolean;
@@ -23,7 +25,12 @@ export interface MaintenancePlanItem {
   hoursRemaining: number | null;
   cyclesRemaining: number | null;
   daysRemaining: number | null;
+  dueBy: DueByType | null;
   status: PlanItemStatus;
+  inWorkRequestNumber: string | null;
+  inWorkRequestId: string | null;
+  legalSource: 'FABRICANTE' | 'DGAC' | 'EASA';
+  lastEvidenceUrl: string | null;
 }
 
 export const maintenancePlanApi = {

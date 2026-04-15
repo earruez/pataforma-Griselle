@@ -1,5 +1,8 @@
 import { MaintenanceTask } from '../entities/MaintenanceTask';
 
+const AVG_FLIGHT_HOURS_PER_DAY = 2;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
 /**
  * Pure domain service: calculates the next-due values for a compliance record.
  * Contains NO I/O — fully unit-testable.
@@ -14,6 +17,16 @@ export interface NextDueValues {
 }
 
 export class ComplianceDueDateService {
+  private addMonths(base: Date, months: number): Date {
+    const result = new Date(base);
+    const baseDay = result.getDate();
+    result.setDate(1);
+    result.setMonth(result.getMonth() + months);
+    const lastDay = new Date(result.getFullYear(), result.getMonth() + 1, 0).getDate();
+    result.setDate(Math.min(baseDay, lastDay));
+    return result;
+  }
+
   /**
    * @param task            The task definition
    * @param currentHours    Aircraft total hours at the time of compliance
@@ -32,10 +45,25 @@ export class ComplianceDueDateService {
     const nextDueCycles =
       task.intervalCycles != null ? currentCycles + task.intervalCycles : null;
 
+    let calendarDueDate: Date | null = null;
+    if (task.intervalCalendarMonths != null) {
+      calendarDueDate = this.addMonths(performedAt, task.intervalCalendarMonths);
+    } else if (task.intervalCalendarDays != null) {
+      calendarDueDate = new Date(performedAt);
+      calendarDueDate.setDate(calendarDueDate.getDate() + task.intervalCalendarDays);
+    }
+
+    const hoursDueDate =
+      task.intervalHours != null
+        ? new Date(performedAt.getTime() + (task.intervalHours / AVG_FLIGHT_HOURS_PER_DAY) * MS_PER_DAY)
+        : null;
+
+    // Dual-limit tasks expire at the earliest criterion.
     let nextDueDate: Date | null = null;
-    if (task.intervalCalendarDays != null) {
-      nextDueDate = new Date(performedAt);
-      nextDueDate.setDate(nextDueDate.getDate() + task.intervalCalendarDays);
+    if (hoursDueDate && calendarDueDate) {
+      nextDueDate = hoursDueDate <= calendarDueDate ? hoursDueDate : calendarDueDate;
+    } else {
+      nextDueDate = calendarDueDate ?? hoursDueDate;
     }
 
     return { nextDueHours, nextDueCycles, nextDueDate };
@@ -82,8 +110,16 @@ export class ComplianceDueDateService {
   hoursRemaining(
     nextDueHours: number | null,
     currentHours: number,
+    nextDueDate: Date | null = null,
+    today: Date = new Date(),
   ): number | null {
-    if (nextDueHours == null) return null;
-    return nextDueHours - currentHours;
+    const byHours = nextDueHours != null ? nextDueHours - currentHours : null;
+    const byCalendar =
+      nextDueDate != null
+        ? ((nextDueDate.getTime() - today.getTime()) / MS_PER_DAY) * AVG_FLIGHT_HOURS_PER_DAY
+        : null;
+
+    if (byHours != null && byCalendar != null) return Math.min(byHours, byCalendar);
+    return byHours ?? byCalendar;
   }
 }

@@ -3,6 +3,8 @@ import { apiClient } from './client';
 // ── Enums ──────────────────────────────────────────────────────────────────
 
 export type WorkOrderStatus = 'DRAFT' | 'OPEN' | 'IN_PROGRESS' | 'QUALITY' | 'CLOSED';
+export type WorkOrderAssignmentStatus = 'PENDING' | 'ASSIGNED' | 'IN_PROGRESS' | 'AWAITING_EVIDENCE' | 'EVIDENCE_UPLOADED' | 'CLOSED';
+export type WorkOrderEvidenceType = 'PHOTO' | 'PDF' | 'BOTH';
 export type DiscrepancyStatus = 'OPEN' | 'DEFERRED' | 'RESOLVED' | 'CANCELLED';
 
 // ── Shapes ─────────────────────────────────────────────────────────────────
@@ -67,6 +69,14 @@ export interface WorkOrder {
   title: string;
   description: string | null;
   status: WorkOrderStatus;
+  // Assignment workflow fields
+  assignmentStatus: WorkOrderAssignmentStatus;
+  assignedAt: string | null;
+  evidenceFileUrl: string | null;
+  evidenceFileName: string | null;
+  evidenceUploadedAt: string | null;
+  evidenceUploadedBy: string | null;
+  evidenceType: WorkOrderEvidenceType | null;
   createdById: string;
   assignedTechnicianId: string | null;
   inspectorId: string | null;
@@ -217,6 +227,61 @@ export const workOrdersApi = {
   // Document
   getDocument: async (id: string) => {
     const { data } = await apiClient.get<{ status: string; data: unknown }>(`/work-orders/${id}/document`);
+    return data.data;
+  },
+
+  // ── Assignment Workflow ──────────────────────────────────────────────────
+
+  getPendingAssignment: async (): Promise<WorkOrder[]> => {
+    const { data } = await apiClient.get<{ success: boolean; data: WorkOrder[] }>('/work-orders/pending-assignment');
+    return data.data;
+  },
+
+  assign: async (workOrderId: string, technicianId: string, sendEmail?: boolean): Promise<WorkOrder> => {
+    const { data } = await apiClient.post<{ success: boolean; data: WorkOrder }>(`/work-orders/${workOrderId}/assign`, { technicianId, sendEmail });
+    return data.data;
+  },
+
+  startExecution: async (workOrderId: string): Promise<WorkOrder> => {
+    const { data } = await apiClient.post<{ success: boolean; data: WorkOrder }>(`/work-orders/${workOrderId}/start-execution`, {});
+    return data.data;
+  },
+
+  uploadEvidence: async (workOrderId: string, file: File): Promise<WorkOrder> => {
+    const formData = new FormData();
+    formData.append('evidence', file);
+    const { data } = await apiClient.post<{ success: boolean; data: { workOrder: WorkOrder } }>(
+      `/work-orders/${workOrderId}/upload-evidence`,
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data' } }
+    );
+    return data.data.workOrder;
+  },
+
+  closeWorkOrder: async (workOrderId: string): Promise<WorkOrder> => {
+    const { data } = await apiClient.post<{ success: boolean; data: WorkOrder }>(`/work-orders/${workOrderId}/close`, {});
+    return data.data;
+  },
+
+  downloadPdf: (workOrderId: string): string => {
+    return `/api/v1/work-orders/${workOrderId}/download-pdf`;
+  },
+
+  emailPdf: async (workOrderId: string, email: string): Promise<void> => {
+    await apiClient.post(`/work-orders/${workOrderId}/email-pdf`, { email });
+  },
+
+  generatePendingForAircraft: async (aircraftId: string): Promise<{ generatedCount: number; workOrders: WorkOrder[] }> => {
+    const { data } = await apiClient.post<{ success: boolean; data: { generatedCount: number; workOrders: WorkOrder[] } }>(
+      `/work-orders/${aircraftId}/generate-pending`, {}
+    );
+    return data.data;
+  },
+
+  getAvailableTechnicians: async (): Promise<Array<{ id: string; name: string; email: string; licenseNumber: string | null }>> => {
+    const { data } = await apiClient.get<{ status: string; data: Array<{ id: string; name: string; email: string; licenseNumber: string | null }> }>(
+      '/work-orders/available-technicians'
+    );
     return data.data;
   },
 };

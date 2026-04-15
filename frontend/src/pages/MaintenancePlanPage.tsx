@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { aircraftApi } from '@api/aircraft.api';
 import type { Aircraft } from '@api/aircraft.api';
@@ -10,14 +10,220 @@ import { tasksApi } from '@api/tasks.api';
 import type { TaskDefinition, CreateTaskInput } from '@api/tasks.api';
 import { complianceApi } from '@api/compliance.api';
 import type { RecordComplianceInput } from '@api/compliance.api';
+import { classifyRemaining, type HealthBucket } from '@/shared/maintenancePlanClassifier';
+import { useWorkRequestStore } from '../store/workRequestStore';
+import { isActiveWorkRequestStatus } from '@/shared/workRequestTypes';
 import {
   ClipboardCheck, AlertTriangle, Clock, CheckCircle2,
   ChevronRight, Search, BookOpen, Calendar, Gauge, RefreshCw,
   Plus, Pencil, Trash2, X, Check,
 } from 'lucide-react';
 
+type MaintenanceType = 'HORARIO' | 'CALENDARIO' | 'MIXTO';
+type MaintenanceTypeTab = 'ALL' | MaintenanceType;
+type NormativeTab = 'ALL' | 'FABRICANTE' | 'DGAC' | 'MOTOR' | 'EASA';
+
+const MAINTENANCE_TYPE_META: Record<MaintenanceType, { label: string; badge: string }> = {
+  HORARIO: {
+    label: 'Horario',
+    badge: 'bg-blue-50 text-blue-700 ring-blue-600/20',
+  },
+  CALENDARIO: {
+    label: 'Calendario',
+    badge: 'bg-orange-50 text-orange-700 ring-orange-600/20',
+  },
+  MIXTO: {
+    label: 'Mixto',
+    badge: 'bg-purple-50 text-purple-700 ring-purple-600/20',
+  },
+};
+
+function classifyMaintenanceType(task: {
+  intervalType: string;
+  intervalHours: number | null;
+  intervalCalendarDays: number | null;
+  intervalCalendarMonths?: number | null;
+}): MaintenanceType {
+  const hasLimit1 = task.intervalHours != null && task.intervalHours > 0;
+  const hasLimit2 =
+    (task.intervalCalendarDays != null && task.intervalCalendarDays > 0)
+    || (task.intervalCalendarMonths != null && task.intervalCalendarMonths > 0);
+
+  if (hasLimit1 && hasLimit2) return 'MIXTO';
+  if (hasLimit1) return 'HORARIO';
+  if (hasLimit2) return 'CALENDARIO';
+
+  if (task.intervalType === 'FLIGHT_HOURS_OR_CALENDAR') return 'MIXTO';
+  if (task.intervalType === 'CALENDAR_DAYS') return 'CALENDARIO';
+  return 'HORARIO';
+}
+
+function isMotorNormativeTask(item: MaintenancePlanItem): boolean {
+  const code = (item.taskCode || '').toUpperCase();
+  const title = (item.taskTitle || '').toUpperCase();
+  const ref = (item.referenceNumber || '').toUpperCase();
+
+  if (/^72\d{2}(-\d+)?$/.test(code)) return true;
+  if (code.startsWith('05-20-10')) return true;
+  if (ref.includes('70BM')) return true;
+
+  return /(ENGINE|MOTOR|TURBINE|COMPRESSOR|GEARBOX|HMU|ACCESSORIES|INJECTION WHEEL|FREE TURBINE|REDUCTION GEAR)/.test(title);
+}
+
 // ─── Status helpers ────────────────────────────────────────────────────────────
 const STATUS_ORDER: Record<PlanItemStatus, number> = { OVERDUE: 0, DUE_SOON: 1, NEVER_PERFORMED: 2, OK: 3 };
+
+type PriorityVisual = 'critical' | 'attention' | 'controlled';
+type PriorityBand = 'overdue' | 'next-critical' | 'next-normal' | 'no-urgency';
+type PriorityDriver = 'HORAS' | 'FECHA' | 'NONE';
+type AircraftAlertState = 'normal' | 'attention' | 'critical';
+type RiskLevel = 'bajo' | 'medio' | 'alto' | 'critico';
+
+interface SmartPriority {
+  visual: PriorityVisual;
+  band: PriorityBand;
+  driver: PriorityDriver;
+  remaining: number | null;
+  mixedReason: 'horas' | 'fecha' | null;
+}
+
+const BAND_ORDER: Record<PriorityBand, number> = {
+  overdue: 0,
+  'next-critical': 1,
+  'next-normal': 2,
+  'no-urgency': 3,
+};
+
+const VISUAL_META: Record<PriorityVisual, { label: string; badge: string; dot: string }> = {
+  critical: {
+    label: 'Crítico',
+    badge: 'bg-rose-50 text-rose-700 border-rose-200',
+    dot: 'bg-rose-500',
+  },
+  attention: {
+    label: 'Atención',
+    badge: 'bg-amber-50 text-amber-700 border-amber-200',
+    dot: 'bg-amber-500',
+  },
+  controlled: {
+    label: 'Controlado',
+    badge: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    dot: 'bg-emerald-500',
+  },
+};
+
+const AIRCRAFT_ALERT_META: Record<Exclude<AircraftAlertState, 'normal'>, {
+  title: string;
+  bg: string;
+  border: string;
+  text: string;
+}> = {
+  critical: {
+    title: 'Esta aeronave ya debería ingresar a mantenimiento',
+    bg: 'bg-rose-50',
+    border: 'border-rose-200',
+    text: 'text-rose-800',
+  },
+  attention: {
+    title: 'Esta aeronave requiere planificación de ingreso',
+    bg: 'bg-amber-50',
+    border: 'border-amber-200',
+    text: 'text-amber-800',
+  },
+};
+
+const RISK_LEVEL_META: Record<RiskLevel, {
+  label: string;
+  card: string;
+  badge: string;
+}> = {
+  bajo: {
+    label: 'Bajo',
+    card: 'bg-emerald-50 border-emerald-200',
+    badge: 'bg-emerald-100 text-emerald-800 border-emerald-300',
+  },
+  medio: {
+    label: 'Medio',
+    card: 'bg-amber-50 border-amber-200',
+    badge: 'bg-amber-100 text-amber-800 border-amber-300',
+  },
+  alto: {
+    label: 'Alto',
+    card: 'bg-orange-50 border-orange-200',
+    badge: 'bg-orange-100 text-orange-800 border-orange-300',
+  },
+  critico: {
+    label: 'Crítico',
+    card: 'bg-rose-50 border-rose-200',
+    badge: 'bg-rose-100 text-rose-800 border-rose-300',
+  },
+};
+
+function getSmartPriority(item: MaintenancePlanItem): SmartPriority {
+  const maintenanceType = classifyMaintenanceType(item);
+
+  let driver: PriorityDriver = 'NONE';
+  let remaining: number | null = null;
+  let mixedReason: 'horas' | 'fecha' | null = null;
+
+  if (maintenanceType === 'HORARIO') {
+    driver = 'HORAS';
+    remaining = item.hoursRemaining ?? null;
+  } else if (maintenanceType === 'CALENDARIO') {
+    driver = 'FECHA';
+    remaining = item.daysRemaining ?? null;
+  } else {
+    const hasHours = item.hoursRemaining != null;
+    const hasDays = item.daysRemaining != null;
+
+    if (hasHours && hasDays) {
+      if (item.hoursRemaining! <= item.daysRemaining!) {
+        driver = 'HORAS';
+        remaining = item.hoursRemaining!;
+        mixedReason = 'horas';
+      } else {
+        driver = 'FECHA';
+        remaining = item.daysRemaining!;
+        mixedReason = 'fecha';
+      }
+    } else if (hasHours) {
+      driver = 'HORAS';
+      remaining = item.hoursRemaining!;
+      mixedReason = 'horas';
+    } else if (hasDays) {
+      driver = 'FECHA';
+      remaining = item.daysRemaining!;
+      mixedReason = 'fecha';
+    }
+  }
+
+  const unit = driver === 'HORAS' ? 'FH' : driver === 'FECHA' ? 'DAYS' : null;
+  const computedRisk: HealthBucket =
+    remaining != null && unit
+      ? classifyRemaining(remaining, unit)
+      : item.status === 'OVERDUE'
+        ? 'danger'
+        : item.status === 'DUE_SOON' || item.status === 'NEVER_PERFORMED'
+          ? 'warning'
+          : 'healthy';
+
+  const overdue = item.status === 'OVERDUE' || (remaining != null && remaining < 0);
+  const visual: PriorityVisual = overdue || computedRisk === 'danger'
+    ? 'critical'
+    : computedRisk === 'warning' || item.status === 'NEVER_PERFORMED'
+      ? 'attention'
+      : 'controlled';
+
+  const band: PriorityBand = overdue
+    ? 'overdue'
+    : visual === 'critical'
+      ? 'next-critical'
+      : visual === 'attention'
+        ? 'next-normal'
+        : 'no-urgency';
+
+  return { visual, band, driver, remaining, mixedReason };
+}
 
 const STATUS_META: Record<PlanItemStatus, { label: string; badge: string; icon: typeof AlertTriangle }> = {
   OVERDUE:         { label: 'Vencida',        badge: 'badge-overdue',      icon: AlertTriangle },
@@ -40,15 +246,7 @@ function refBadge(type: string) {
   return `inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-bold ring-1 ring-inset ${REF_BADGE[type] ?? REF_BADGE.INTERNAL}`;
 }
 
-// ─── Interval & reference options ─────────────────────────────────────────────
-const INTERVAL_TYPES = [
-  { value: 'FLIGHT_HOURS',            label: 'Horas de vuelo' },
-  { value: 'CYCLES',                  label: 'Ciclos' },
-  { value: 'CALENDAR_DAYS',           label: 'Días calendario' },
-  { value: 'FLIGHT_HOURS_OR_CALENDAR',label: 'H. vuelo o calendario' },
-  { value: 'ON_CONDITION',            label: 'A condición' },
-];
-
+// ─── Reference options ───────────────────────────────────────────────────────
 const REFERENCE_TYPES = ['AD', 'AMM', 'SB', 'CMR', 'MPD', 'ETOPS', 'INTERNAL'];
 
 // ─── Modal shell ──────────────────────────────────────────────────────────────
@@ -234,10 +432,12 @@ type TaskFormState = {
   code: string;
   title: string;
   description: string;
+  maintenanceType: MaintenanceType;
   intervalType: string;
   intervalHours: string;
   intervalCycles: string;
   intervalCalendarDays: string;
+  intervalCalendarMonths: string;
   toleranceHours: string;
   toleranceCycles: string;
   toleranceCalendarDays: string;
@@ -250,8 +450,8 @@ type TaskFormState = {
 
 function blankForm(): TaskFormState {
   return {
-    code: '', title: '', description: '', intervalType: 'FLIGHT_HOURS',
-    intervalHours: '', intervalCycles: '', intervalCalendarDays: '',
+    code: '', title: '', description: '', maintenanceType: 'HORARIO', intervalType: 'FLIGHT_HOURS',
+    intervalHours: '', intervalCycles: '', intervalCalendarDays: '', intervalCalendarMonths: '',
     toleranceHours: '', toleranceCycles: '', toleranceCalendarDays: '',
     referenceType: 'AMM', referenceNumber: '',
     isMandatory: false, requiresInspection: false, estimatedManHours: '',
@@ -263,10 +463,12 @@ function taskToForm(task: TaskDefinition): TaskFormState {
     code: task.code,
     title: task.title,
     description: task.description,
+    maintenanceType: classifyMaintenanceType(task),
     intervalType: task.intervalType,
     intervalHours: task.intervalHours != null ? String(task.intervalHours) : '',
     intervalCycles: task.intervalCycles != null ? String(task.intervalCycles) : '',
     intervalCalendarDays: task.intervalCalendarDays != null ? String(task.intervalCalendarDays) : '',
+    intervalCalendarMonths: task.intervalCalendarMonths != null ? String(task.intervalCalendarMonths) : '',
     toleranceHours: task.toleranceHours != null ? String(task.toleranceHours) : '',
     toleranceCycles: task.toleranceCycles != null ? String(task.toleranceCycles) : '',
     toleranceCalendarDays: task.toleranceCalendarDays != null ? String(task.toleranceCalendarDays) : '',
@@ -279,14 +481,22 @@ function taskToForm(task: TaskDefinition): TaskFormState {
 }
 
 function formToInput(f: TaskFormState): CreateTaskInput {
+  const intervalType =
+    f.maintenanceType === 'MIXTO'
+      ? 'FLIGHT_HOURS_OR_CALENDAR'
+      : f.maintenanceType === 'CALENDARIO'
+        ? 'CALENDAR_DAYS'
+        : 'FLIGHT_HOURS';
+
   return {
     code: f.code.trim().toUpperCase(),
     title: f.title.trim(),
     description: f.description.trim(),
-    intervalType: f.intervalType,
+    intervalType,
     intervalHours: f.intervalHours ? Number(f.intervalHours) : null,
     intervalCycles: f.intervalCycles ? Number(f.intervalCycles) : null,
     intervalCalendarDays: f.intervalCalendarDays ? Number(f.intervalCalendarDays) : null,
+    intervalCalendarMonths: f.intervalCalendarMonths ? Number(f.intervalCalendarMonths) : null,
     toleranceHours: f.toleranceHours ? Number(f.toleranceHours) : null,
     toleranceCycles: f.toleranceCycles ? Number(f.toleranceCycles) : null,
     toleranceCalendarDays: f.toleranceCalendarDays ? Number(f.toleranceCalendarDays) : null,
@@ -313,9 +523,8 @@ function CreateEditTaskModal({
   const set = (k: keyof TaskFormState, v: string | boolean) =>
     setForm(prev => ({ ...prev, [k]: v }));
 
-  const showHours    = form.intervalType === 'FLIGHT_HOURS' || form.intervalType === 'FLIGHT_HOURS_OR_CALENDAR';
-  const showCycles   = form.intervalType === 'CYCLES';
-  const showCalendar = form.intervalType === 'CALENDAR_DAYS' || form.intervalType === 'FLIGHT_HOURS_OR_CALENDAR' || form.intervalType === 'ON_CONDITION';
+  const showLimit1 = form.maintenanceType === 'HORARIO' || form.maintenanceType === 'MIXTO';
+  const showLimit2 = form.maintenanceType === 'CALENDARIO' || form.maintenanceType === 'MIXTO';
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -350,12 +559,20 @@ function CreateEditTaskModal({
                   placeholder="EG. TRK-100" className="input font-mono uppercase" required />
               </F>
             )}
-            <F label="Tipo de intervalo" required>
-              <select value={form.intervalType} onChange={e => set('intervalType', e.target.value)} className="input">
-                {INTERVAL_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+            <F label="Tipo de mantenimiento" required>
+              <select value={form.maintenanceType} onChange={e => set('maintenanceType', e.target.value as MaintenanceType)} className="input">
+                <option value="HORARIO">Mantenimiento Horario</option>
+                <option value="CALENDARIO">Mantenimiento Calendario</option>
+                <option value="MIXTO">Mantenimiento Mixto</option>
               </select>
             </F>
           </div>
+
+          {form.maintenanceType === 'MIXTO' && (
+            <div className="rounded-lg border border-purple-200 bg-purple-50/50 px-3 py-2 text-xs text-purple-700">
+              Vencimiento por criterio mixto: se considera vencida por lo que ocurra primero.
+            </div>
+          )}
 
           <F label="Título" required>
             <input value={form.title} onChange={e => set('title', e.target.value)}
@@ -368,39 +585,33 @@ function CreateEditTaskModal({
           </F>
 
           {/* Interval values */}
-          {form.intervalType !== 'ON_CONDITION' && (
+          {form.maintenanceType && (
             <div className="grid grid-cols-3 gap-3">
-              {showHours && (
-                <F label="Intervalo (h)">
+              {showLimit1 && (
+                <F label="Limit 1 (Horas)">
                   <input type="number" min="1" value={form.intervalHours}
                     onChange={e => set('intervalHours', e.target.value)} className="input" />
                 </F>
               )}
-              {showCycles && (
-                <F label="Intervalo (cic.)">
-                  <input type="number" min="1" value={form.intervalCycles}
-                    onChange={e => set('intervalCycles', e.target.value)} className="input" />
+              {showLimit2 && (
+                <F label="Limit 2 (Meses)">
+                  <input type="number" min="1" value={form.intervalCalendarMonths}
+                    onChange={e => set('intervalCalendarMonths', e.target.value)} className="input" />
                 </F>
               )}
-              {showCalendar && (
-                <F label="Intervalo (días)">
+              {showLimit2 && (
+                <F label="Limit 2 (Días)">
                   <input type="number" min="1" value={form.intervalCalendarDays}
                     onChange={e => set('intervalCalendarDays', e.target.value)} className="input" />
                 </F>
               )}
-              {showHours && (
+              {showLimit1 && (
                 <F label="Tolerancia (h)">
                   <input type="number" min="0" value={form.toleranceHours}
                     onChange={e => set('toleranceHours', e.target.value)} className="input" />
                 </F>
               )}
-              {showCycles && (
-                <F label="Tolerancia (cic.)">
-                  <input type="number" min="0" value={form.toleranceCycles}
-                    onChange={e => set('toleranceCycles', e.target.value)} className="input" />
-                </F>
-              )}
-              {showCalendar && (
+              {showLimit2 && (
                 <F label="Tolerancia (días)">
                   <input type="number" min="0" value={form.toleranceCalendarDays}
                     onChange={e => set('toleranceCalendarDays', e.target.value)} className="input" />
@@ -487,172 +698,247 @@ function ConfirmRemoveModal({
   );
 }
 
+function SelectWorkRequestTargetModal({
+  items,
+  candidates,
+  onClose,
+  onSelect,
+  onCreateNew,
+}: {
+  items: MaintenancePlanItem[];
+  candidates: Array<{ id: string; folio: string; statusLabel: string; itemsCount: number }>;
+  onClose: () => void;
+  onSelect: (workRequestId: string) => void;
+  onCreateNew: () => void;
+}) {
+  const firstCode = items[0]?.taskCode ?? 'tarea';
+  const count = items.length;
+
+  return (
+    <Modal title="Seleccionar borrador ST" onClose={onClose}>
+      <div className="px-6 py-5 space-y-3">
+        <p className="text-sm text-slate-700">
+          {count === 1
+            ? <>Hay varias ST abiertas para esta aeronave. Elige dónde agregar la tarea <span className="font-semibold">{firstCode}</span>.</>
+            : <>Hay varias ST abiertas para esta aeronave. Elige dónde agregar las <span className="font-semibold">{count} tareas seleccionadas</span>.</>}
+        </p>
+
+        <div className="space-y-2 max-h-[280px] overflow-y-auto pr-1">
+          {candidates.map((st) => (
+            <button
+              key={st.id}
+              onClick={() => onSelect(st.id)}
+              className="w-full text-left rounded-lg border border-slate-200 bg-white hover:bg-slate-50 px-3 py-2.5 transition-colors"
+            >
+              <p className="text-sm font-semibold text-slate-900">{st.folio}</p>
+              <p className="text-xs text-slate-500 mt-0.5">{st.statusLabel} · {st.itemsCount} ítems</p>
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="px-6 py-4 border-t border-slate-100 flex justify-end gap-2.5">
+        <button onClick={onClose} className="btn-secondary">Cancelar</button>
+        <button onClick={onCreateNew} className="btn-primary">Nueva ST</button>
+      </div>
+    </Modal>
+  );
+}
+
 // ─── Summary bar ──────────────────────────────────────────────────────────────
 function SummaryBar({ items }: { items: MaintenancePlanItem[] }) {
   const overdue  = items.filter(i => i.status === 'OVERDUE').length;
   const dueSoon  = items.filter(i => i.status === 'DUE_SOON').length;
-  const ok       = items.filter(i => i.status === 'OK').length;
+  const inRequest = items.filter(i => Boolean(i.inWorkRequestId || i.inWorkRequestNumber)).length;
   const never    = items.filter(i => i.status === 'NEVER_PERFORMED').length;
-  const total    = items.length;
 
   const cards = [
-    { label: 'Vencidas',     value: overdue, cls: 'text-rose-700',   bg: 'bg-rose-50 border-rose-200',    dot: 'bg-rose-500' },
-    { label: 'Próx. vencer', value: dueSoon, cls: 'text-amber-700',  bg: 'bg-amber-50 border-amber-200',  dot: 'bg-amber-400' },
-    { label: 'Al día',       value: ok,      cls: 'text-emerald-700',bg: 'bg-emerald-50 border-emerald-200', dot: 'bg-emerald-500' },
-    { label: 'Sin registro', value: never,   cls: 'text-slate-600',  bg: 'bg-slate-50 border-slate-200',  dot: 'bg-slate-400' },
+    { label: 'Vencidas', value: overdue, subtitle: 'Requieren acción inmediata', cls: 'text-rose-700', bg: 'bg-rose-50 border-rose-200' },
+    { label: 'Próximas', value: dueSoon, subtitle: 'Programar antes del límite', cls: 'text-amber-700', bg: 'bg-amber-50 border-amber-200' },
+    { label: 'En solicitud', value: inRequest, subtitle: 'Ya en gestión ST', cls: 'text-blue-700', bg: 'bg-blue-50 border-blue-200' },
+    { label: 'Sin registro', value: never, subtitle: 'Pendientes de trazabilidad', cls: 'text-slate-700', bg: 'bg-slate-50 border-slate-200' },
   ];
 
   return (
-    <div className="grid grid-cols-4 gap-3 shrink-0">
+    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 shrink-0">
       {cards.map(c => (
-        <div key={c.label} className={`rounded-xl border ${c.bg} p-3.5 flex items-center gap-3`}>
-          <div className={`w-2.5 h-2.5 rounded-full shrink-0 ${c.dot}`} />
-          <div>
-            <p className={`text-xl font-bold tabular-nums leading-none ${c.cls}`}>{c.value}</p>
-            <p className="text-[11px] text-slate-500 mt-0.5">{c.label}</p>
-          </div>
-          {c.value > 0 && total > 0 && (
-            <span className="ml-auto text-[10px] text-slate-400">
-              {Math.round((c.value / total) * 100)}%
-            </span>
-          )}
+        <div key={c.label} className={`rounded-xl border ${c.bg} px-4 py-3.5`}> 
+          <p className="text-[11px] uppercase tracking-wide font-semibold text-slate-500">{c.label}</p>
+          <p className={`text-3xl font-extrabold tabular-nums leading-none mt-1 ${c.cls}`}>{c.value}</p>
+          <p className="text-[11px] text-slate-500 mt-1">{c.subtitle}</p>
         </div>
       ))}
     </div>
   );
 }
 
-// ─── Task row ─────────────────────────────────────────────────────────────────
+function getOperationalStatusLabel(status: string): string {
+  if (status === 'IN_MAINTENANCE') return 'En mantenimiento';
+  if (status === 'OPERATIONAL') return 'Operacional';
+  if (status === 'GROUNDED') return 'En tierra';
+  if (status === 'AOG') return 'AOG';
+  return status.replace('_', ' ');
+}
+
+function getOperationalStatusClass(status: string): string {
+  if (status === 'OPERATIONAL') return 'bg-emerald-50 text-emerald-700 border-emerald-200';
+  if (status === 'AOG') return 'bg-rose-50 text-rose-700 border-rose-200';
+  if (status === 'IN_MAINTENANCE') return 'bg-blue-50 text-blue-700 border-blue-200';
+  if (status === 'GROUNDED') return 'bg-amber-50 text-amber-700 border-amber-200';
+  return 'bg-slate-50 text-slate-700 border-slate-200';
+}
+
 interface TaskRowProps {
   item: MaintenancePlanItem;
+  priority: SmartPriority;
+  inlineST?: { id: string; folio: string };
+  selected: boolean;
+  selectable: boolean;
+  onToggleSelect: (item: MaintenancePlanItem, checked: boolean) => void;
   onRecord: (item: MaintenancePlanItem) => void;
   onEdit:   (item: MaintenancePlanItem) => void;
   onRemove: (item: MaintenancePlanItem) => void;
+  onGenerateST: (item: MaintenancePlanItem) => void;
+  onViewST: (item: MaintenancePlanItem, stId?: string) => void;
 }
 
-function TaskRow({ item, onRecord, onEdit, onRemove }: TaskRowProps) {
+function TaskRow({
+  item,
+  priority,
+  inlineST,
+  selected,
+  selectable,
+  onToggleSelect,
+  onRecord,
+  onEdit,
+  onRemove,
+  onGenerateST,
+  onViewST,
+}: TaskRowProps) {
   const meta = STATUS_META[item.status];
-  const StatusIcon = meta.icon;
+  const visualMeta = VISUAL_META[priority.visual];
+  const maintenanceType = classifyMaintenanceType(item);
+  const typeMeta = MAINTENANCE_TYPE_META[maintenanceType];
+  const resolvedStId = inlineST?.id ?? item.inWorkRequestId ?? null;
+  const resolvedStRef = inlineST?.folio ?? item.inWorkRequestNumber ?? resolvedStId;
+  const hasST = Boolean(resolvedStId);
 
   const intervalLabel = () => {
     const parts = [];
-    if (item.intervalHours)        parts.push(`${item.intervalHours}h`);
-    if (item.intervalCycles)       parts.push(`${item.intervalCycles} cic.`);
-    if (item.intervalCalendarDays) parts.push(`${item.intervalCalendarDays}d`);
+    if (item.intervalHours) parts.push(`${item.intervalHours} h`);
+    if (item.intervalCycles) parts.push(`${item.intervalCycles} cic`);
+    if (item.intervalCalendarDays) parts.push(`${item.intervalCalendarDays} d`);
+    if (item.intervalCalendarMonths) parts.push(`${item.intervalCalendarMonths} m`);
     return parts.join(' / ') || '—';
   };
 
   const nextDueLabel = () => {
     const parts = [];
-    if (item.nextDueHours)  parts.push(`${item.nextDueHours.toFixed(0)}h`);
-    if (item.nextDueCycles) parts.push(`${item.nextDueCycles} cic.`);
-    if (item.nextDueDate)   parts.push(new Date(item.nextDueDate).toLocaleDateString('es-MX'));
+    if (item.nextDueHours) parts.push(`${item.nextDueHours.toFixed(0)}h`);
+    if (item.nextDueCycles) parts.push(`${item.nextDueCycles} cic`);
+    if (item.nextDueDate) parts.push(new Date(item.nextDueDate).toLocaleDateString('es-MX'));
     return parts.join(' · ') || '—';
   };
 
-  const remainingLabel = () => {
-    const parts = [];
-    if (item.hoursRemaining  != null) parts.push(`${item.hoursRemaining > 0 ? '+' : ''}${item.hoursRemaining}h`);
-    if (item.cyclesRemaining != null) parts.push(`${item.cyclesRemaining > 0 ? '+' : ''}${item.cyclesRemaining} cic.`);
-    if (item.daysRemaining   != null) parts.push(`${item.daysRemaining > 0 ? '+' : ''}${item.daysRemaining}d`);
-    return parts.join(' · ') || null;
-  };
+  const rowAccent = item.status === 'OVERDUE'
+    ? 'border-l-4 border-l-rose-500'
+    : priority.visual === 'critical'
+      ? 'border-l-4 border-l-rose-400'
+      : priority.visual === 'attention'
+      ? 'border-l-4 border-l-amber-400'
+      : hasST
+        ? 'border-l-4 border-l-blue-400'
+        : 'border-l-4 border-l-transparent';
 
-  const rowBg = item.status === 'OVERDUE' ? 'bg-rose-50/60'
-    : item.status === 'DUE_SOON' ? 'bg-amber-50/40'
-    : '';
+  const rowBg = hasST
+    ? 'bg-blue-50/35'
+    : priority.visual === 'critical'
+      ? 'bg-rose-50/60'
+      : priority.visual === 'attention'
+        ? 'bg-amber-50/40'
+        : '';
 
   return (
-    <tr className={`group border-b border-slate-100 last:border-0 transition-colors hover:bg-slate-50/80 ${rowBg}`}>
-      {/* Status icon */}
-      <td className="px-4 py-3.5 w-8">
-        <StatusIcon size={14} className={
-          item.status === 'OVERDUE'   ? 'text-rose-500' :
-          item.status === 'DUE_SOON'  ? 'text-amber-500' :
-          item.status === 'OK'        ? 'text-emerald-500' : 'text-slate-400'
-        } />
+    <tr className={`border-b border-slate-100 last:border-0 hover:bg-slate-50/70 transition-colors ${rowAccent} ${rowBg} ${selected ? 'ring-1 ring-brand-200' : ''}`}>
+      <td className="px-3 py-3.5 whitespace-nowrap text-center">
+        <input
+          type="checkbox"
+          className="rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+          checked={selected}
+          disabled={!selectable}
+          onChange={(e) => onToggleSelect(item, e.target.checked)}
+        />
       </td>
-      {/* Code + title */}
-      <td className="px-2 py-3.5 min-w-[180px]">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="font-mono text-xs font-bold text-slate-800">{item.taskCode}</span>
-          {item.isMandatory && <span className={refBadge(item.referenceType)}>{item.referenceType}</span>}
+      <td className="px-4 py-3.5 min-w-[270px]">
+        <div className="flex items-start gap-2">
+          <div>
+            <p className="font-mono text-[11px] font-semibold text-slate-500">{item.taskCode}</p>
+            <p className="text-base font-semibold text-slate-900 leading-snug mt-0.5">{item.taskTitle}</p>
+            {hasST && (
+              <span className="inline-flex mt-1 text-[10px] font-semibold bg-blue-100 text-blue-800 border border-blue-200 px-2 py-0.5 rounded-full">
+                Incluida en solicitud
+              </span>
+            )}
+          </div>
         </div>
-        <p className="text-xs text-slate-500 mt-0.5 line-clamp-1">{item.taskTitle}</p>
       </td>
-      {/* Interval */}
-      <td className="table-cell text-xs text-slate-500 whitespace-nowrap">
-        <span className="flex items-center gap-1">
-          <RefreshCw size={11} className="text-slate-300 shrink-0" />
-          {intervalLabel()}
+      <td className="px-4 py-3.5 whitespace-nowrap text-xs">
+        <span className={`inline-flex items-center rounded-md px-2 py-1 text-[11px] font-semibold ring-1 ring-inset ${typeMeta.badge}`}>
+          {typeMeta.label}
         </span>
-      </td>
-      {/* Next due */}
-      <td className="table-cell text-xs whitespace-nowrap">
-        <span className={item.status === 'OVERDUE' ? 'text-rose-700 font-semibold' : item.status === 'DUE_SOON' ? 'text-amber-700' : 'text-slate-600'}>
-          {nextDueLabel()}
-        </span>
-        {remainingLabel() && (
-          <p className={`text-[10px] mt-0.5 ${
-            item.status === 'OVERDUE' ? 'text-rose-500' :
-            item.status === 'DUE_SOON' ? 'text-amber-500' : 'text-slate-400'
-          }`}>
-            {remainingLabel()}
+        {maintenanceType === 'MIXTO' && priority.mixedReason && (
+          <p className="mt-1 text-[11px] font-semibold text-slate-600">
+            {priority.mixedReason === 'horas' ? 'Vence por horas' : 'Vence por fecha'}
           </p>
         )}
       </td>
-      {/* Last performed */}
-      <td className="table-cell text-xs text-slate-500 whitespace-nowrap">
+      <td className="px-4 py-3.5 whitespace-nowrap text-xs text-slate-600">{intervalLabel()}</td>
+      <td className="px-4 py-3.5 whitespace-nowrap text-xs">
+        <span className={item.status === 'OVERDUE' ? 'text-rose-700 font-semibold' : item.status === 'DUE_SOON' ? 'text-amber-700 font-semibold' : 'text-slate-600'}>
+          {nextDueLabel()}
+        </span>
+      </td>
+      <td className="px-4 py-3.5 whitespace-nowrap text-xs text-slate-600">
         {item.lastPerformedAt
-          ? <span className="flex items-center gap-1">
-              <Calendar size={11} className="text-slate-300 shrink-0" />
-              {new Date(item.lastPerformedAt).toLocaleDateString('es-MX')}
-              {item.lastHoursAtCompliance != null && (
-                <span className="text-slate-400"> · {item.lastHoursAtCompliance.toFixed(0)}h</span>
-              )}
+          ? `${new Date(item.lastPerformedAt).toLocaleDateString('es-MX')}${item.lastHoursAtCompliance != null ? ` · ${item.lastHoursAtCompliance.toFixed(0)}h` : ''}`
+          : '—'}
+      </td>
+      <td className="px-4 py-3.5 whitespace-nowrap">
+        <div className="flex items-center gap-1.5">
+          <span className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-semibold ${visualMeta.badge}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${visualMeta.dot}`} />
+            {visualMeta.label}
+          </span>
+          <span className="inline-flex items-center rounded-md border border-slate-200 bg-white px-2 py-0.5 text-[11px] font-medium text-slate-700">
+            {meta.label}
+          </span>
+        </div>
+      </td>
+      <td className="px-4 py-3.5 whitespace-nowrap">
+        {hasST ? (
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
+              {inlineST ? `En borrador ${resolvedStRef}` : `ST ${resolvedStRef}`}
             </span>
-          : <span className="text-slate-300">—</span>
-        }
-        {item.lastWorkOrder && (
-          <p className="text-[10px] text-slate-400 mt-0.5">{item.lastWorkOrder}</p>
+            <button className="btn-secondary btn-xs" onClick={() => onViewST(item, resolvedStId ?? undefined)}>
+              Ver ST
+            </button>
+          </div>
+        ) : (
+          <button className="btn-primary btn-xs" onClick={() => onGenerateST(item)}>
+            Agregar a ST
+          </button>
         )}
       </td>
-      {/* MH estimate */}
-      <td className="table-cell text-xs text-slate-500 text-right whitespace-nowrap">
-        {item.estimatedManHours != null
-          ? <span className="flex items-center justify-end gap-1">
-              <Gauge size={11} className="text-slate-300" />{item.estimatedManHours}h
-            </span>
-          : <span className="text-slate-300">—</span>
-        }
-      </td>
-      {/* Status badge */}
-      <td className="px-4 py-3.5 text-right whitespace-nowrap">
-        <span className={meta.badge}>{meta.label}</span>
-      </td>
-      {/* Actions */}
-      <td className="pr-4 py-3.5 whitespace-nowrap">
-        <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button
-            title="Registrar cumplimiento"
-            onClick={() => onRecord(item)}
-            className="p-1.5 rounded-lg text-emerald-600 hover:bg-emerald-50 transition-colors"
-          >
-            <Check size={14} />
+      <td className="px-4 py-3.5 whitespace-nowrap">
+        <div className="flex items-center gap-1.5">
+          <button title="Registrar cumplimiento" onClick={() => onRecord(item)} className="btn-secondary btn-xs">
+            Registrar
           </button>
-          <button
-            title="Editar tarea"
-            onClick={() => onEdit(item)}
-            className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 transition-colors"
-          >
-            <Pencil size={13} />
+          <button title="Editar tarea" onClick={() => onEdit(item)} className="btn-xs btn-outline">
+            Editar
           </button>
-          <button
-            title="Eliminar del plan"
-            onClick={() => onRemove(item)}
-            className="p-1.5 rounded-lg text-rose-500 hover:bg-rose-50 transition-colors"
-          >
-            <Trash2 size={13} />
+          <button title="Eliminar del plan" onClick={() => onRemove(item)} className="btn-xs btn-outline text-rose-700">
+            Eliminar
           </button>
         </div>
       </td>
@@ -669,11 +955,23 @@ type ModalState =
   | { type: 'edit-task'; task: TaskDefinition }
   | { type: 'confirm-remove'; item: MaintenancePlanItem };
 
+type PendingSTSelection = {
+  items: MaintenancePlanItem[];
+  candidates: Array<{ id: string; folio: string; statusLabel: string; itemsCount: number }>;
+};
+
 export default function MaintenancePlanPage() {
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [filterStatus, setFilterStatus] = useState<PlanItemStatus | ''>(searchParams.get('status') as PlanItemStatus | '' ?? '');
+  const [normativeTab, setNormativeTab] = useState<NormativeTab>('ALL');
+  const [maintenanceTab, setMaintenanceTab] = useState<MaintenanceTypeTab>('ALL');
+  const [onlyPendingAction, setOnlyPendingAction] = useState(false);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
+  const [inlineStByTaskId, setInlineStByTaskId] = useState<Record<string, { id: string; folio: string }>>({});
+  const [pendingSTSelection, setPendingSTSelection] = useState<PendingSTSelection | null>(null);
 
   // Sync URL → filter when navigating here from Dashboard
   useEffect(() => {
@@ -681,6 +979,12 @@ export default function MaintenancePlanPage() {
     if (s) setFilterStatus(s);
   }, [searchParams]);
   const [modal, setModal] = useState<ModalState>(null);
+  const selectWorkRequest = useWorkRequestStore((s) => s.selectWorkRequest);
+  const getDraftWorkRequestByAircraft = useWorkRequestStore((s) => s.getDraftWorkRequestByAircraft);
+  const workRequests = useWorkRequestStore((s) => s.workRequests);
+  const createWorkRequest = useWorkRequestStore((s) => s.createWorkRequest);
+  const addItemToWorkRequest = useWorkRequestStore((s) => s.addItemToWorkRequest);
+  const itemAlreadyInOpenWorkRequest = useWorkRequestStore((s) => s.itemAlreadyInOpenWorkRequest);
 
   const qc = useQueryClient();
 
@@ -690,10 +994,18 @@ export default function MaintenancePlanPage() {
   });
   const allAircraft: Aircraft[] = result ?? [];
 
-  const { data: planItems = [], isLoading: loadingPlan } = useQuery({
+  const {
+    data: planItems = [],
+    isLoading: loadingPlan,
+    isError: planError,
+    error: planErrorDetails,
+  } = useQuery({
     queryKey: ['maintenance-plan', selectedId],
     queryFn: () => maintenancePlanApi.getForAircraft(selectedId!),
     enabled: !!selectedId,
+    staleTime: 0,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
   });
 
   // All org tasks — preloaded so "edit" can look up the full definition
@@ -750,29 +1062,200 @@ export default function MaintenancePlanPage() {
   const selectedAircraftReg = selectedAircraft?.registration ?? '';
   const assignedTaskIds = useMemo(() => planItems.map(i => i.taskId), [planItems]);
 
-  // Health badge per aircraft
-  const healthMap = useMemo(() => {
-    const map = new Map<string, { overdue: number; dueSoon: number }>();
-    if (selectedAircraft) {
-      const overdue = planItems.filter(i => i.status === 'OVERDUE').length;
-      const dueSoon = planItems.filter(i => i.status === 'DUE_SOON').length;
-      map.set(selectedId!, { overdue, dueSoon });
+  useEffect(() => {
+    setInlineStByTaskId({});
+    setSelectedTaskIds([]);
+  }, [selectedId]);
+
+  const resolveInlineSt = (item: MaintenancePlanItem) => inlineStByTaskId[item.taskId];
+  const isItemInRequest = (item: MaintenancePlanItem) => Boolean(item.inWorkRequestId || item.inWorkRequestNumber || resolveInlineSt(item));
+
+  const smartPriorityByTaskId = useMemo(() => {
+    const map = new Map<string, SmartPriority>();
+    for (const item of planItems) {
+      map.set(item.taskId, getSmartPriority(item));
     }
     return map;
-  }, [selectedId, planItems, selectedAircraft]);
+  }, [planItems]);
 
   const filteredPlan = useMemo(() => {
     return planItems
       .filter(i => {
+        if (normativeTab === 'DGAC' && i.referenceType !== 'INTERNAL') return false;
+        if (normativeTab === 'EASA' && i.referenceType !== 'AD') return false;
+        if (normativeTab === 'MOTOR' && !isMotorNormativeTask(i)) return false;
+        if (normativeTab === 'FABRICANTE') {
+          if (i.referenceType !== 'AMM') return false;
+          if (isMotorNormativeTask(i)) return false;
+        }
+        if (maintenanceTab !== 'ALL' && classifyMaintenanceType(i) !== maintenanceTab) return false;
         if (filterStatus && i.status !== filterStatus) return false;
+        if (onlyPendingAction && i.status === 'OK') return false;
         if (search) {
           const q = search.toLowerCase();
           return i.taskCode.toLowerCase().includes(q) || i.taskTitle.toLowerCase().includes(q);
         }
         return true;
       })
-      .sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status]);
-  }, [planItems, filterStatus, search]);
+      .sort((a, b) => {
+        const ap = smartPriorityByTaskId.get(a.taskId) ?? getSmartPriority(a);
+        const bp = smartPriorityByTaskId.get(b.taskId) ?? getSmartPriority(b);
+
+        const bandSort = BAND_ORDER[ap.band] - BAND_ORDER[bp.band];
+        if (bandSort !== 0) return bandSort;
+
+        const ar = ap.remaining ?? Number.POSITIVE_INFINITY;
+        const br = bp.remaining ?? Number.POSITIVE_INFINITY;
+        if (ar !== br) return ar - br;
+
+        return STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
+      });
+  }, [planItems, filterStatus, normativeTab, maintenanceTab, search, smartPriorityByTaskId, onlyPendingAction]);
+
+  const normativeCounts = useMemo(() => {
+    const dgac = planItems.filter(i => i.referenceType === 'INTERNAL').length;
+    const easa = planItems.filter(i => i.referenceType === 'AD').length;
+    const motor = planItems.filter(i => isMotorNormativeTask(i)).length;
+    const fabricante = planItems.filter(i => i.referenceType === 'AMM' && !isMotorNormativeTask(i)).length;
+    return { dgac, easa, motor, fabricante };
+  }, [planItems]);
+
+  const pendingActionCount = useMemo(() => (
+    planItems.filter((item) => item.status !== 'OK').length
+  ), [planItems]);
+
+  const smartSummary = useMemo(() => {
+    const criticalItems = filteredPlan.filter((item) => {
+      const priority = smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item);
+      return priority.visual === 'critical';
+    });
+
+    const byHours = criticalItems.filter((item) => {
+      const priority = smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item);
+      return priority.driver === 'HORAS';
+    }).length;
+
+    const byDate = criticalItems.filter((item) => {
+      const priority = smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item);
+      return priority.driver === 'FECHA';
+    }).length;
+
+    return {
+      critical: criticalItems.length,
+      byHours,
+      byDate,
+    };
+  }, [filteredPlan, smartPriorityByTaskId]);
+
+  const draftForAircraft = useMemo(() => (
+    selectedId ? getDraftWorkRequestByAircraft(selectedId) : null
+  ), [selectedId, getDraftWorkRequestByAircraft]);
+
+  const openWorkRequestsForAircraft = useMemo(() => {
+    if (!selectedId) return [];
+    return workRequests.filter((wr) => wr.aircraftId === selectedId && isActiveWorkRequestStatus(wr.status));
+  }, [selectedId, workRequests]);
+
+  const aircraftRiskScore = useMemo(() => {
+    let overdueCount = 0;
+    let dueSoonCriticalCount = 0;
+    let mixedCriticalCount = 0;
+    let neverRelevantCount = 0;
+    let inWorkRequestCount = 0;
+    let dueSoonCount = 0;
+
+    for (const item of planItems) {
+      const priority = smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item);
+      const maintenanceType = classifyMaintenanceType(item);
+      const inRequest = isItemInRequest(item);
+
+      if (item.status === 'OVERDUE') overdueCount += 1;
+      if (item.status === 'DUE_SOON') dueSoonCount += 1;
+      if (item.status === 'DUE_SOON' && priority.visual === 'critical') dueSoonCriticalCount += 1;
+
+      const mixedCriticalSoon = maintenanceType === 'MIXTO'
+        && (
+          priority.visual === 'critical'
+          || (priority.visual === 'attention' && priority.remaining != null && priority.remaining <= 10)
+        );
+      if (mixedCriticalSoon) mixedCriticalCount += 1;
+
+      if (item.status === 'NEVER_PERFORMED' && (item.isMandatory || priority.visual !== 'controlled')) {
+        neverRelevantCount += 1;
+      }
+
+      if (inRequest) inWorkRequestCount += 1;
+    }
+
+    const rawScore = (
+      overdueCount * 30
+      + dueSoonCriticalCount * 15
+      + mixedCriticalCount * 20
+      + neverRelevantCount * 2
+    );
+
+    const mitigation = Math.min(inWorkRequestCount * 8, Math.floor(rawScore * 0.35));
+    const score = Math.max(0, Math.min(100, rawScore - mitigation));
+
+    const level: RiskLevel = score >= 75
+      ? 'critico'
+      : score >= 50
+        ? 'alto'
+        : score >= 25
+          ? 'medio'
+          : 'bajo';
+
+    return {
+      score,
+      level,
+      overdueCount,
+      dueSoonCount,
+      inWorkRequestCount,
+      rawScore,
+      mitigation,
+    };
+  }, [planItems, smartPriorityByTaskId, inlineStByTaskId]);
+
+  const aircraftAlert = useMemo(() => {
+    const overdueCount = planItems.filter((item) => item.status === 'OVERDUE').length;
+    const dueSoonCount = planItems.filter((item) => item.status === 'DUE_SOON').length;
+
+    const mixedCriticalSoonCount = planItems.filter((item) => {
+      if (classifyMaintenanceType(item) !== 'MIXTO') return false;
+      const priority = smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item);
+      if (priority.driver === 'HORAS' && priority.remaining != null) return priority.remaining <= 10;
+      if (priority.driver === 'FECHA' && priority.remaining != null) return priority.remaining <= 10;
+      return false;
+    }).length;
+
+    const pendingWithoutSTCount = planItems.filter((item) => (
+      item.status !== 'OK' && !isItemInRequest(item)
+    )).length;
+
+    const draftItemsCount = draftForAircraft?.items.length ?? 0;
+    const hasAccumulatedDraft = draftItemsCount >= 3;
+
+    const state: AircraftAlertState = overdueCount >= 1
+      ? 'critical'
+      : (dueSoonCount >= 3 || mixedCriticalSoonCount >= 1 || pendingWithoutSTCount >= 4)
+        ? 'attention'
+        : 'normal';
+
+    return {
+      state,
+      overdueCount,
+      dueSoonCount,
+      mixedCriticalSoonCount,
+      pendingWithoutSTCount,
+      hasAccumulatedDraft,
+      draftItemsCount,
+    };
+  }, [planItems, smartPriorityByTaskId, draftForAircraft, inlineStByTaskId]);
+
+  const handleReviewCritical = () => {
+    setOnlyPendingAction(true);
+    setFilterStatus(aircraftAlert.state === 'critical' ? 'OVERDUE' : 'DUE_SOON');
+  };
 
   // Handlers for TaskRow callbacks
   const handleRecord = (item: MaintenancePlanItem) => setModal({ type: 'record-compliance', item });
@@ -783,118 +1266,390 @@ export default function MaintenancePlanPage() {
   };
   const handleRemove = (item: MaintenancePlanItem) => setModal({ type: 'confirm-remove', item });
 
+  const applyInlineStForTask = (taskId: string, stId: string) => {
+    const wr = workRequests.find((x) => x.id === stId);
+    setInlineStByTaskId((prev) => ({
+      ...prev,
+      [taskId]: { id: stId, folio: wr?.folio ?? stId },
+    }));
+  };
+
+  const addTaskItemToWorkRequest = (item: MaintenancePlanItem, workRequestId: string, options?: { silent?: boolean }) => {
+    if (!selectedAircraft) return;
+
+    const wr = workRequests.find((x) => x.id === workRequestId);
+    const alreadyInTarget = wr?.items.some((it) => it.sourceKind === 'maintenance_plan' && it.sourceId === item.taskId);
+    if (alreadyInTarget) {
+      applyInlineStForTask(item.taskId, workRequestId);
+      if (!options?.silent) toast('La tarea ya estaba en esta ST', { icon: 'ℹ️' });
+      return { added: false, linked: true };
+    }
+
+    const inserted = addItemToWorkRequest(workRequestId, {
+      sourceKind: 'maintenance_plan',
+      sourceId: item.taskId,
+      ataCode: item.taskCode,
+      title: item.taskTitle,
+      description: item.taskTitle,
+      aircraftHoursAtRequest: selectedAircraft.totalFlightHours,
+      aircraftCyclesAtRequest: selectedAircraft.totalCycles,
+      priority: item.status === 'OVERDUE' ? 'alta' : 'media',
+      referenceCode: item.taskCode,
+      regulatoryBasis: item.referenceNumber ?? item.referenceType,
+    });
+
+    if (!inserted) {
+      if (!options?.silent) toast.error('No se pudo agregar el item al borrador ST');
+      return { added: false, linked: false };
+    }
+
+    applyInlineStForTask(item.taskId, workRequestId);
+    if (!options?.silent) toast.success('Agregado al borrador ST');
+    return { added: true, linked: true };
+  };
+
+  const addItemsToWorkRequest = (
+    items: MaintenancePlanItem[],
+    workRequestId: string,
+    options?: { mode?: 'single' | 'multi' },
+  ) => {
+    const unique = Array.from(new Map(items.map((item) => [item.taskId, item])).values());
+    let added = 0;
+    let linked = 0;
+
+    for (const item of unique) {
+      const result = addTaskItemToWorkRequest(item, workRequestId, { silent: true });
+      if (result?.linked) linked += 1;
+      if (result?.added) added += 1;
+    }
+
+    const wr = workRequests.find((x) => x.id === workRequestId);
+    const stRef = wr?.folio ?? workRequestId;
+
+    if (linked > 0) {
+      if (options?.mode === 'single') {
+        toast.success(`Ítem agregado a ${stRef}`);
+      } else {
+        toast.success(`${linked} ítems agregados a ${stRef}`);
+      }
+    } else {
+      toast('No hubo ítems para agregar', { icon: 'ℹ️' });
+    }
+
+    setSelectedTaskIds([]);
+    return { added, linked, stId: workRequestId, stRef };
+  };
+
+  const getSTCandidates = () => (
+    openWorkRequestsForAircraft.map((wr) => ({
+      id: wr.id,
+      folio: wr.folio,
+      statusLabel: wr.status === 'draft' ? 'Borrador' : 'En proceso',
+      itemsCount: wr.items.length,
+    }))
+  );
+
+  const sendItemsToST = (items: MaintenancePlanItem[], options?: { mode?: 'single' | 'multi' }) => {
+    if (!selectedAircraft) {
+      toast.error('Selecciona una aeronave para agregar ítems a ST');
+      return;
+    }
+
+    const validItems = items.filter((item) => !item.inWorkRequestId);
+    if (validItems.length === 0) {
+      toast('Todas las tareas seleccionadas ya están en una ST', { icon: 'ℹ️' });
+      setSelectedTaskIds([]);
+      return;
+    }
+
+    if (openWorkRequestsForAircraft.length > 1) {
+      setPendingSTSelection({ items: validItems, candidates: getSTCandidates() });
+      return;
+    }
+
+    const target = draftForAircraft ?? createWorkRequest(selectedAircraft.id);
+    addItemsToWorkRequest(validItems, target.id, { mode: options?.mode ?? 'multi' });
+  };
+
+  const handleGenerateSTFromPlan = (item: MaintenancePlanItem) => {
+    if (!selectedAircraft) {
+      toast.error('Selecciona una aeronave para agregar el item a ST');
+      return;
+    }
+
+    const existingInline = resolveInlineSt(item);
+    if (existingInline) {
+      toast('La tarea ya está agregada a un borrador ST', { icon: 'ℹ️' });
+      return;
+    }
+
+    if (item.inWorkRequestId) {
+      toast('Esta tarea ya tiene una ST activa', { icon: 'ℹ️' });
+      return;
+    }
+
+    const existingOpenForItem = itemAlreadyInOpenWorkRequest('maintenance_plan', item.taskId);
+    if (existingOpenForItem) {
+      applyInlineStForTask(item.taskId, existingOpenForItem.id);
+      toast('La tarea ya estaba en una ST abierta', { icon: 'ℹ️' });
+      return;
+    }
+
+    sendItemsToST([item], { mode: 'single' });
+  };
+
+  const handleToggleTaskSelection = (item: MaintenancePlanItem, checked: boolean) => {
+    setSelectedTaskIds((prev) => {
+      if (checked) return prev.includes(item.taskId) ? prev : [...prev, item.taskId];
+      return prev.filter((id) => id !== item.taskId);
+    });
+  };
+
+  const selectedItems = useMemo(() => (
+    filteredPlan.filter((item) => selectedTaskIds.includes(item.taskId))
+  ), [filteredPlan, selectedTaskIds]);
+
+  const handleAddSelectedToST = () => {
+    if (selectedItems.length === 0) {
+      toast('Selecciona al menos una tarea', { icon: 'ℹ️' });
+      return;
+    }
+    sendItemsToST(selectedItems, { mode: 'multi' });
+  };
+
+  const handleViewSTFromPlan = (item: MaintenancePlanItem, stId?: string) => {
+    if (!selectedAircraft) return;
+    const targetId = stId ?? item.inWorkRequestId ?? resolveInlineSt(item)?.id;
+    if (!targetId) return;
+    selectWorkRequest(targetId, 'general');
+    navigate(`/work-requests?aircraftId=${selectedAircraft.id}&stId=${targetId}`);
+  };
+
   return (
     <>
-    <div className="flex h-full min-h-0 overflow-hidden">
-      {/* ── Aircraft list sidebar ── */}
-      <aside className="w-64 shrink-0 border-r border-slate-200 bg-white flex flex-col overflow-hidden">
-        <div className="px-4 pt-6 pb-3 shrink-0">
-          <h2 className="text-sm font-bold text-slate-900">Plan de Mantenimiento</h2>
-          <p className="text-xs text-slate-400 mt-0.5">Selecciona una aeronave</p>
-        </div>
-        <div className="px-3 pb-3 shrink-0">
-          <div className="relative">
-            <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
-            <input
-              type="text"
-              placeholder="Buscar matrícula…"
-              className="filter-input pl-8 w-full text-[12px]"
-              onChange={e => {
-                const q = e.target.value.toLowerCase();
-                setSearch(selectedId ? search : q);
-              }}
-            />
-          </div>
-        </div>
-        <div className="flex-1 overflow-y-auto px-2 pb-3">
-          {loadingAircraft && (
-            <p className="text-center py-8 text-xs text-slate-400">Cargando…</p>
-          )}
-          {allAircraft.map(a => {
-            const h = healthMap.get(a.id);
-            const isSelected = a.id === selectedId;
-            return (
-              <button
-                key={a.id}
-                onClick={() => setSelectedId(a.id)}
-                className={`w-full text-left px-3 py-2.5 rounded-lg mb-0.5 transition-colors group ${
-                  isSelected
-                    ? 'bg-brand-50 border border-brand-200'
-                    : 'hover:bg-slate-50 border border-transparent'
-                }`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono text-[13px] font-bold text-slate-900 truncate">{a.registration}</span>
-                  <div className="flex gap-1 shrink-0">
-                    {h?.overdue  ? <span className="w-4 h-4 rounded-full bg-rose-500   text-white text-[9px] font-bold flex items-center justify-center">{h.overdue}</span>  : null}
-                    {h?.dueSoon  ? <span className="w-4 h-4 rounded-full bg-amber-400  text-white text-[9px] font-bold flex items-center justify-center">{h.dueSoon}</span>  : null}
-                  </div>
+    <div className="p-6 lg:p-8 h-full min-h-0 flex flex-col gap-4">
+      <div className="bg-white rounded-2xl border border-slate-200 p-5 lg:p-6 shadow-sm">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="min-w-[320px] flex-1">
+            <h1 className="text-2xl font-bold text-slate-900 tracking-tight mb-3">Plan de Mantenimiento</h1>
+            <label className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-1.5">Aeronave</label>
+            <select
+              className="input w-full"
+              value={selectedId ?? ''}
+              onChange={(e) => setSelectedId(e.target.value || null)}
+              disabled={loadingAircraft}
+            >
+              <option value="">{loadingAircraft ? 'Cargando aeronaves…' : 'Seleccionar aeronave'}</option>
+              {allAircraft.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.registration} · {a.manufacturer} {a.model}
+                </option>
+              ))}
+            </select>
+            {selectedAircraft && (
+              <div className="mt-3 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs">
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                  <p className="text-slate-500">Matrícula</p>
+                  <p className="font-semibold text-slate-900 font-mono">{selectedAircraft.registration}</p>
                 </div>
-                <p className="text-[11px] text-slate-400 truncate mt-0.5">{a.manufacturer} · {a.model}</p>
-                <div className="flex items-center gap-1 mt-1">
-                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
-                    a.status === 'OPERATIONAL'    ? 'bg-emerald-50 text-emerald-700' :
-                    a.status === 'AOG'            ? 'bg-rose-50 text-rose-700' :
-                    a.status === 'IN_MAINTENANCE' ? 'bg-blue-50 text-blue-700' :
-                    a.status === 'GROUNDED'       ? 'bg-amber-50 text-amber-700' :
-                    'bg-slate-100 text-slate-500'
-                  }`}>{a.status.replace('_', ' ')}</span>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                  <p className="text-slate-500">Modelo</p>
+                  <p className="font-semibold text-slate-900">{selectedAircraft.manufacturer} {selectedAircraft.model}</p>
                 </div>
-              </button>
-            );
-          })}
-        </div>
-      </aside>
-
-      {/* ── Main content ── */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {!selectedAircraft ? (
-          <div className="flex-1 flex flex-col items-center justify-center text-slate-400 gap-3">
-            <ClipboardCheck size={40} strokeWidth={1.5} className="text-slate-300" />
-            <p className="text-sm font-medium">Selecciona una aeronave para ver su plan</p>
-          </div>
-        ) : (
-          <div className="flex flex-col h-full overflow-hidden">
-            {/* Header */}
-            <div className="px-8 pt-7 pb-5 shrink-0 border-b border-slate-100">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="flex items-center gap-2 text-xs text-slate-400 mb-1">
-                    <span>Plan de Mantenimiento</span>
-                    <ChevronRight size={11} />
-                    <span className="font-semibold text-slate-600">{selectedAircraft.registration}</span>
-                  </div>
-                  <h1 className="text-xl font-bold text-slate-900">{selectedAircraft.registration}</h1>
-                  <p className="text-sm text-slate-500 mt-0.5">
-                    {selectedAircraft.manufacturer} {selectedAircraft.model} · {selectedAircraft.totalFlightHours.toFixed(0)}h / {selectedAircraft.totalCycles} cic.
-                  </p>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                  <p className="text-slate-500">Horas / ciclos</p>
+                  <p className="font-semibold text-slate-900">{selectedAircraft.totalFlightHours.toFixed(0)}h / {selectedAircraft.totalCycles} cic.</p>
                 </div>
-                <div className="flex items-center gap-3 shrink-0">
-                  <div className="text-right">
-                    <p className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Tareas asignadas</p>
-                    <p className="text-3xl font-bold text-slate-900 tabular-nums">{planItems.length}</p>
-                  </div>
-                  <button
-                    onClick={() => setModal({ type: 'assign-task' })}
-                    className="btn-primary gap-1.5"
-                  >
-                    <Plus size={15} />
-                    Agregar tarea
-                  </button>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                  <p className="text-slate-500">Estado operacional</p>
+                  <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${getOperationalStatusClass(selectedAircraft.status)}`}>
+                    {getOperationalStatusLabel(selectedAircraft.status)}
+                  </span>
                 </div>
               </div>
+            )}
+          </div>
+          <div className="shrink-0 min-w-[280px] w-full lg:w-auto">
+            <div className="flex items-start justify-end gap-2.5 flex-wrap lg:flex-nowrap">
+              <div className="text-right rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 min-w-[112px]">
+                <p className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Tareas asignadas</p>
+                <p className="text-3xl font-bold text-slate-900 tabular-nums leading-none mt-1">{planItems.length}</p>
+              </div>
 
-              {/* Summary cards */}
-              {planItems.length > 0 && (
-                <div className="mt-5">
-                  <SummaryBar items={planItems} />
+              {selectedAircraft && (
+                <div className={`rounded-xl border px-3.5 py-2.5 min-w-[230px] ${RISK_LEVEL_META[aircraftRiskScore.level].card}`}>
+                  <p className="text-[10px] uppercase tracking-widest font-semibold text-slate-500">Riesgo Operacional</p>
+                  <div className="flex items-end gap-2 mt-1">
+                    <p className="text-3xl font-extrabold text-slate-900 tabular-nums leading-none">{aircraftRiskScore.score}</p>
+                    <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${RISK_LEVEL_META[aircraftRiskScore.level].badge}`}>
+                      {RISK_LEVEL_META[aircraftRiskScore.level].label}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-600 mt-1" title="Calculado según vencimientos, proximidad y tareas sin control">
+                    Calculado según vencimientos, proximidad y tareas sin control
+                  </p>
+                  <p className="text-[11px] text-slate-700 mt-1.5 font-medium">
+                    {aircraftRiskScore.overdueCount} vencida{aircraftRiskScore.overdueCount !== 1 ? 's' : ''} · {aircraftRiskScore.dueSoonCount} próxima{aircraftRiskScore.dueSoonCount !== 1 ? 's' : ''} · {aircraftRiskScore.inWorkRequestCount} en solicitud
+                  </p>
                 </div>
               )}
             </div>
 
-            {/* Filters */}
-            <div className="px-8 py-3 shrink-0 border-b border-slate-100 bg-slate-50/60">
-              <div className="flex items-center gap-2.5 flex-wrap">
+            <div className="flex items-center justify-end gap-2 mt-2.5">
+              <button
+                onClick={() => setModal({ type: 'assign-task' })}
+                className="btn-primary gap-1.5"
+                disabled={!selectedAircraft}
+              >
+                <Plus size={15} />
+                Agregar tarea
+              </button>
+              <button
+                onClick={() => navigate(`/work-requests?aircraftId=${selectedId ?? ''}`)}
+                className="btn-secondary gap-1.5"
+                title="Ver Solicitudes de Trabajo"
+                disabled={!selectedAircraft}
+              >
+                Ver solicitudes
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {selectedAircraft && planItems.length > 0 && (
+          <div className="mt-5">
+            <SummaryBar items={planItems} />
+          </div>
+        )}
+      </div>
+
+      {!selectedAircraft ? (
+        <div className="flex-1 bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col items-center justify-center text-slate-400 gap-3">
+          <ClipboardCheck size={40} strokeWidth={1.5} className="text-slate-300" />
+          <p className="text-sm font-medium">Selecciona una aeronave para ver su plan</p>
+        </div>
+      ) : (
+        <>
+          {(aircraftAlert.state !== 'normal' || aircraftAlert.hasAccumulatedDraft) && (
+            <div
+              className={`rounded-2xl border px-5 py-4 shadow-sm ${
+                aircraftAlert.state === 'critical'
+                  ? `${AIRCRAFT_ALERT_META.critical.bg} ${AIRCRAFT_ALERT_META.critical.border}`
+                  : aircraftAlert.state === 'attention'
+                    ? `${AIRCRAFT_ALERT_META.attention.bg} ${AIRCRAFT_ALERT_META.attention.border}`
+                    : 'bg-slate-50 border-slate-200'
+              }`}
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className={`text-sm font-semibold ${
+                    aircraftAlert.state === 'critical'
+                      ? AIRCRAFT_ALERT_META.critical.text
+                      : aircraftAlert.state === 'attention'
+                        ? AIRCRAFT_ALERT_META.attention.text
+                        : 'text-slate-700'
+                  }`}>
+                    {aircraftAlert.state === 'critical'
+                      ? AIRCRAFT_ALERT_META.critical.title
+                      : aircraftAlert.state === 'attention'
+                        ? AIRCRAFT_ALERT_META.attention.title
+                        : 'Hay acciones pendientes por organizar'}
+                  </p>
+                  <p className="text-xs text-slate-600 mt-1">
+                    {aircraftAlert.overdueCount > 0 && `${aircraftAlert.overdueCount} vencida${aircraftAlert.overdueCount !== 1 ? 's' : ''}`}
+                    {aircraftAlert.overdueCount > 0 && aircraftAlert.dueSoonCount > 0 && ' · '}
+                    {aircraftAlert.dueSoonCount > 0 && `${aircraftAlert.dueSoonCount} próxima${aircraftAlert.dueSoonCount !== 1 ? 's' : ''}`}
+                    {(aircraftAlert.overdueCount > 0 || aircraftAlert.dueSoonCount > 0) && aircraftAlert.mixedCriticalSoonCount > 0 && ' · '}
+                    {aircraftAlert.mixedCriticalSoonCount > 0 && `${aircraftAlert.mixedCriticalSoonCount} mixta muy cercana`}
+                    {(aircraftAlert.overdueCount > 0 || aircraftAlert.dueSoonCount > 0 || aircraftAlert.mixedCriticalSoonCount > 0) && aircraftAlert.pendingWithoutSTCount > 0 && ' · '}
+                    {aircraftAlert.pendingWithoutSTCount > 0 && `${aircraftAlert.pendingWithoutSTCount} pendiente${aircraftAlert.pendingWithoutSTCount !== 1 ? 's' : ''} sin ST`}
+                    {(aircraftAlert.overdueCount > 0 || aircraftAlert.dueSoonCount > 0 || aircraftAlert.mixedCriticalSoonCount > 0 || aircraftAlert.pendingWithoutSTCount > 0) && aircraftAlert.hasAccumulatedDraft && ' · '}
+                    {aircraftAlert.hasAccumulatedDraft && `Borrador ST con ${aircraftAlert.draftItemsCount} ítems acumulados`}
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    className="btn-secondary btn-xs"
+                    onClick={handleReviewCritical}
+                  >
+                    Revisar tareas críticas
+                  </button>
+                  <button
+                    className="btn-secondary btn-xs"
+                    onClick={() => navigate(`/work-requests?aircraftId=${selectedId ?? ''}`)}
+                  >
+                    Ver solicitudes
+                  </button>
+                  {draftForAircraft && (
+                    <button
+                      className="btn-primary btn-xs"
+                      onClick={() => {
+                        selectWorkRequest(draftForAircraft.id, 'general');
+                        navigate(`/work-requests?aircraftId=${selectedId ?? ''}&stId=${draftForAircraft.id}`);
+                      }}
+                    >
+                      Abrir borrador ST
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Filters */}
+          <div className="bg-white rounded-2xl border border-slate-200 px-6 py-4 shadow-sm">
+              <div className="flex items-center gap-2 flex-wrap lg:flex-nowrap">
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mr-1 shrink-0">Origen</span>
+                {([
+                  { key: 'ALL', label: `Todas (${planItems.length})` },
+                  { key: 'FABRICANTE', label: `Fabricante (${normativeCounts.fabricante})` },
+                  { key: 'DGAC', label: `DGAC (${normativeCounts.dgac})` },
+                  { key: 'MOTOR', label: `Motor (${normativeCounts.motor})` },
+                  { key: 'EASA', label: `EASA (${normativeCounts.easa})` },
+                ] as const).map(tab => (
+                  <button
+                    key={tab.key}
+                    onClick={() => setNormativeTab(tab.key)}
+                    className={`text-xs font-semibold px-2.5 py-1 rounded-full border transition-colors shrink-0 ${
+                      normativeTab === tab.key
+                        ? 'bg-brand-600 text-white border-brand-600'
+                        : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-2 mt-2.5 flex-wrap lg:flex-nowrap">
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mr-1 shrink-0">Tipo de control</span>
+                {([
+                  { key: 'ALL', label: 'Todas' },
+                  { key: 'HORARIO', label: 'Horario', icon: Clock },
+                  { key: 'CALENDARIO', label: 'Calendario', icon: Calendar },
+                  { key: 'MIXTO', label: 'Mixto', icon: RefreshCw },
+                ] as Array<{ key: MaintenanceTypeTab; label: string; icon?: typeof Clock }>).map(tab => {
+                  const Icon = tab.icon;
+                  const active = maintenanceTab === tab.key;
+                  return (
+                    <button
+                      key={tab.key}
+                      onClick={() => setMaintenanceTab(tab.key)}
+                      className={`text-xs font-semibold px-2.5 py-1 rounded-full border transition-colors shrink-0 inline-flex items-center gap-1.5 ${
+                        active
+                          ? 'bg-slate-900 text-white border-slate-900'
+                          : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                      }`}
+                    >
+                      {Icon && <Icon size={12} />}
+                      {tab.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="flex items-center gap-2 mt-2.5 flex-wrap lg:flex-nowrap">
                 <div className="relative">
                   <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                   <input
@@ -902,13 +1657,13 @@ export default function MaintenancePlanPage() {
                     placeholder="Buscar tarea…"
                     value={search}
                     onChange={e => setSearch(e.target.value)}
-                    className="filter-input pl-8 w-48"
+                    className="filter-input pl-8 w-56"
                   />
                 </div>
                 <select
                   value={filterStatus}
                   onChange={e => setFilterStatus(e.target.value as PlanItemStatus | '')}
-                  className="filter-input cursor-pointer"
+                  className="filter-input cursor-pointer min-w-[170px]"
                 >
                   <option value="">Todos los estados</option>
                   <option value="OVERDUE">Vencidas</option>
@@ -916,9 +1671,18 @@ export default function MaintenancePlanPage() {
                   <option value="OK">Al día</option>
                   <option value="NEVER_PERFORMED">Sin registro</option>
                 </select>
-                {(search || filterStatus) && (
+                <label className="inline-flex items-center gap-2 text-xs text-slate-600 shrink-0">
+                  <input
+                    type="checkbox"
+                    className="rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+                    checked={onlyPendingAction}
+                    onChange={(e) => setOnlyPendingAction(e.target.checked)}
+                  />
+                  Solo pendientes de acción
+                </label>
+                {(search || filterStatus || normativeTab !== 'ALL' || maintenanceTab !== 'ALL') && (
                   <button
-                    onClick={() => { setSearch(''); setFilterStatus(''); }}
+                    onClick={() => { setSearch(''); setFilterStatus(''); setNormativeTab('ALL'); setMaintenanceTab('ALL'); }}
                     className="text-xs text-brand-600 hover:text-brand-700 font-semibold transition-colors"
                   >
                     Limpiar
@@ -930,55 +1694,104 @@ export default function MaintenancePlanPage() {
               </div>
             </div>
 
-            {/* Table */}
-            <div className="flex-1 overflow-auto">
-              {loadingPlan ? (
-                <div className="flex items-center justify-center h-40 text-sm text-slate-400">
-                  Cargando plan de mantenimiento…
-                </div>
-              ) : filteredPlan.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-40 gap-2 text-slate-400">
-                  <ClipboardCheck size={28} strokeWidth={1.5} className="text-slate-300" />
-                  <p className="text-sm">
-                    {planItems.length === 0 ? 'Esta aeronave no tiene tareas asignadas' : 'No hay tareas que coincidan con los filtros'}
-                  </p>
-                  {planItems.length === 0 && (
-                    <button onClick={() => setModal({ type: 'assign-task' })} className="btn-secondary text-xs gap-1 mt-1">
-                      <Plus size={13} /> Agregar primera tarea
-                    </button>
-                  )}
-                </div>
-              ) : (
-                <table className="min-w-full text-sm">
-                  <thead className="bg-white sticky top-0 z-10 border-b border-slate-200">
-                    <tr>
-                      <th className="px-4 py-3 w-8" />
-                      <th className="table-header">Tarea</th>
-                      <th className="table-header">Intervalo</th>
-                      <th className="table-header">Próx. vencimiento</th>
-                      <th className="table-header">Último cumplimiento</th>
-                      <th className="table-header text-right">H-H est.</th>
-                      <th className="table-header text-right">Estado</th>
-                      <th className="px-4 py-3 w-28" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredPlan.map(item => (
-                      <TaskRow
-                        key={item.taskId}
-                        item={item}
-                        onRecord={handleRecord}
-                        onEdit={handleEdit}
-                        onRemove={handleRemove}
-                      />
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
+          <div className="bg-white rounded-2xl border border-slate-200 px-6 py-3 shadow-sm flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm text-slate-700">
+              {smartSummary.critical} tareas críticas · {smartSummary.byHours} por horas · {smartSummary.byDate} por fecha
+            </p>
+            <p className="text-sm text-slate-700">
+              {pendingActionCount} tarea{pendingActionCount !== 1 ? 's' : ''} requieren atención · {planItems.filter((item) => isItemInRequest(item)).length} ya están en solicitud
+            </p>
           </div>
-        )}
-      </div>
+
+          {selectedItems.length > 0 && (
+            <div className="sticky top-0 z-20 rounded-2xl border border-brand-200 bg-brand-50 px-4 py-3 shadow-sm flex flex-wrap items-center justify-between gap-2">
+              <p className="text-sm font-semibold text-brand-800">
+                {selectedItems.length} tarea{selectedItems.length !== 1 ? 's' : ''} seleccionada{selectedItems.length !== 1 ? 's' : ''}
+              </p>
+              <div className="flex items-center gap-2">
+                <button className="btn-primary btn-xs" onClick={handleAddSelectedToST}>
+                  Agregar a ST
+                </button>
+                <button
+                  className="btn-secondary btn-xs"
+                  onClick={() => setSelectedTaskIds([])}
+                >
+                  Limpiar selección
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Table */}
+          <div className="flex-1 overflow-auto bg-white rounded-2xl border border-slate-200 shadow-sm">
+            {loadingPlan ? (
+              <div className="flex items-center justify-center h-40 text-sm text-slate-400">
+                Cargando plan de mantenimiento…
+              </div>
+            ) : planError ? (
+              <div className="flex flex-col items-center justify-center h-40 gap-2 text-slate-400">
+                <AlertTriangle size={28} strokeWidth={1.5} className="text-rose-300" />
+                <p className="text-sm text-rose-600">No se pudo cargar el plan de mantenimiento</p>
+                <p className="text-xs text-slate-400 max-w-lg text-center">
+                  {(planErrorDetails as { message?: string } | null)?.message ?? 'Error de red o servidor'}
+                </p>
+                <button
+                  onClick={() => invalidatePlan()}
+                  className="btn-secondary text-xs gap-1 mt-1"
+                >
+                  <RefreshCw size={13} /> Reintentar
+                </button>
+              </div>
+            ) : filteredPlan.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-40 gap-2 text-slate-400">
+                <ClipboardCheck size={28} strokeWidth={1.5} className="text-slate-300" />
+                <p className="text-sm">
+                  {planItems.length === 0 ? 'Esta aeronave no tiene tareas asignadas' : 'No hay tareas que coincidan con los filtros'}
+                </p>
+                {planItems.length === 0 && (
+                  <button onClick={() => setModal({ type: 'assign-task' })} className="btn-secondary text-xs gap-1 mt-1">
+                    <Plus size={13} /> Agregar primera tarea
+                  </button>
+                )}
+              </div>
+            ) : (
+              <table className="w-full text-sm">
+                <thead className="bg-white sticky top-0 z-10 border-b border-slate-200">
+                  <tr>
+                    <th className="table-header w-12 text-center">Sel</th>
+                    <th className="table-header">Tarea</th>
+                    <th className="table-header">Tipo</th>
+                    <th className="table-header">Intervalo</th>
+                    <th className="table-header">Próx. vencimiento</th>
+                    <th className="table-header">Último cumplimiento</th>
+                    <th className="table-header">Estado</th>
+                    <th className="table-header">Solicitud</th>
+                    <th className="table-header">Acción</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredPlan.map(item => (
+                    <TaskRow
+                      key={item.taskId}
+                      item={item}
+                      priority={smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item)}
+                      inlineST={resolveInlineSt(item)}
+                      selected={selectedTaskIds.includes(item.taskId)}
+                      selectable={!isItemInRequest(item)}
+                      onToggleSelect={handleToggleTaskSelection}
+                      onRecord={handleRecord}
+                      onEdit={handleEdit}
+                      onRemove={handleRemove}
+                      onGenerateST={handleGenerateSTFromPlan}
+                      onViewST={handleViewSTFromPlan}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
     </div>
 
     {/* ── Modals ── */}
@@ -1017,6 +1830,31 @@ export default function MaintenancePlanPage() {
         onClose={() => setModal(null)}
         onConfirm={() => removeMutation.mutate(modal.item.taskId)}
         isPending={removeMutation.isPending}
+      />
+    )}
+    {pendingSTSelection && (
+      <SelectWorkRequestTargetModal
+        items={pendingSTSelection.items}
+        candidates={pendingSTSelection.candidates}
+        onClose={() => setPendingSTSelection(null)}
+        onSelect={(workRequestId) => {
+          addItemsToWorkRequest(
+            pendingSTSelection.items,
+            workRequestId,
+            { mode: pendingSTSelection.items.length === 1 ? 'single' : 'multi' },
+          );
+          setPendingSTSelection(null);
+        }}
+        onCreateNew={() => {
+          if (!selectedAircraft) return;
+          const fresh = createWorkRequest(selectedAircraft.id);
+          addItemsToWorkRequest(
+            pendingSTSelection.items,
+            fresh.id,
+            { mode: pendingSTSelection.items.length === 1 ? 'single' : 'multi' },
+          );
+          setPendingSTSelection(null);
+        }}
       />
     )}
     </>

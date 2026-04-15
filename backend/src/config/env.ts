@@ -11,6 +11,22 @@ const envSchema = z.object({
   JWT_EXPIRES_IN: z.string().default('7d'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
+  
+  // Email configuration
+  EMAIL_PROVIDER: z.enum(['smtp', 'sendgrid']).default('smtp'),
+  EMAIL_FROM_ADDRESS: z.string().email().default('noreply@plataforma.com'),
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: z.coerce.number().default(587),
+  SMTP_SECURE: z.boolean().default(false),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
+  SENDGRID_API_KEY: z.string().optional(),
+  
+  // AWS S3 configuration
+  AWS_ACCESS_KEY_ID: z.string().optional(),
+  AWS_SECRET_ACCESS_KEY: z.string().optional(),
+  AWS_REGION: z.string().default('us-east-1'),
+  AWS_S3_BUCKET: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -20,5 +36,46 @@ if (!parsed.success) {
   process.exit(1);
 }
 
-export const env = parsed.data;
+const rawEnv = parsed.data;
+
+export const env = {
+  // Maintain backward compatibility with uppercase keys
+  NODE_ENV: rawEnv.NODE_ENV,
+  PORT: rawEnv.PORT,
+  DATABASE_URL: rawEnv.DATABASE_URL,
+  JWT_SECRET: rawEnv.JWT_SECRET,
+  JWT_EXPIRES_IN: rawEnv.JWT_EXPIRES_IN,
+  LOG_LEVEL: rawEnv.LOG_LEVEL,
+  CORS_ORIGIN: rawEnv.CORS_ORIGIN,
+  
+  // New camelCase versions for cleaner new code
+  nodeEnv: rawEnv.NODE_ENV,
+  port: rawEnv.PORT,
+  databaseUrl: rawEnv.DATABASE_URL,
+  jwtSecret: rawEnv.JWT_SECRET,
+  jwtExpiresIn: rawEnv.JWT_EXPIRES_IN,
+  logLevel: rawEnv.LOG_LEVEL,
+  corsOrigin: rawEnv.CORS_ORIGIN,
+  
+  // Email configuration
+  email: {
+    provider: rawEnv.EMAIL_PROVIDER,
+    fromAddress: rawEnv.EMAIL_FROM_ADDRESS,
+    smtpHost: rawEnv.SMTP_HOST,
+    smtpPort: rawEnv.SMTP_PORT,
+    smtpSecure: rawEnv.SMTP_SECURE,
+    smtpUser: rawEnv.SMTP_USER,
+    smtpPass: rawEnv.SMTP_PASS,
+    sendgridApiKey: rawEnv.SENDGRID_API_KEY,
+  },
+  
+  // AWS S3 configuration
+  aws: {
+    accessKeyId: rawEnv.AWS_ACCESS_KEY_ID,
+    secretAccessKey: rawEnv.AWS_SECRET_ACCESS_KEY,
+    region: rawEnv.AWS_REGION,
+    s3Bucket: rawEnv.AWS_S3_BUCKET,
+  },
+};
+
 export type Env = typeof env;

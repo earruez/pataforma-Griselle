@@ -91,7 +91,7 @@ export default function LoginPage() {
                 <input
                   name="organization" type="text" required
                   className="input pl-9"
-                  placeholder="ej. erik"
+                  placeholder="ej. demo-airlines"
                   value={form.organization}
                   onChange={handleChange}
                 />

@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { aircraftApi } from '@api/aircraft.api';
 import { complianceApi, type Compliance } from '@api/compliance.api';
 import { Wrench, ChevronDown } from 'lucide-react';
+import { componentChapterLabel, isComponentTaskCode } from '@/shared/componentChapterRules';
 
 function dueBadge(c: Compliance): { label: string; cls: string } {
   const today = Date.now();
@@ -21,12 +22,21 @@ function dueBadge(c: Compliance): { label: string; cls: string } {
 
 export default function CompliancePage() {
   const [selectedAircraftId, setSelectedAircraftId] = useState<string>('');
+  const [complianceTab, setComplianceTab] = useState<'ALL' | 'COMPONENT' | 'GENERAL'>('ALL');
   const { data: aircraft = [] } = useQuery({ queryKey: ['aircraft'], queryFn: aircraftApi.findAll });
   const { data: records = [], isLoading } = useQuery({
     queryKey: ['compliance', 'latest', selectedAircraftId],
     queryFn: () => complianceApi.latestForAircraft(selectedAircraftId),
     enabled: !!selectedAircraftId,
   });
+
+  const filteredRecords = useMemo(() => {
+    if (complianceTab === 'ALL') return records;
+    return records.filter((record) => {
+      const isComponentRecord = isComponentTaskCode(record.task?.code ?? null);
+      return complianceTab === 'COMPONENT' ? isComponentRecord : !isComponentRecord;
+    });
+  }, [records, complianceTab]);
 
   const selected = aircraft.find((a) => a.id === selectedAircraftId);
 
@@ -66,6 +76,31 @@ export default function CompliancePage() {
         )}
       </div>
 
+      {selectedAircraftId && (
+        <div className="flex items-center gap-2">
+          {([
+            { key: 'ALL', label: 'Todos' },
+            { key: 'COMPONENT', label: 'Componentes' },
+            { key: 'GENERAL', label: 'General' },
+          ] as const).map((tab) => (
+            <button
+              key={tab.key}
+              onClick={() => setComplianceTab(tab.key)}
+              className={`text-xs font-semibold px-2.5 py-1 rounded-full border transition-colors ${
+                complianceTab === tab.key
+                  ? 'bg-slate-900 text-white border-slate-900'
+                  : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+          <span className="text-xs text-slate-400 ml-1">
+            Regla de componentes: {componentChapterLabel}
+          </span>
+        </div>
+      )}
+
       {!selectedAircraftId && (
         <div className="bg-white rounded-xl border border-slate-200 shadow-card p-16 text-center text-slate-400">
           Selecciona una aeronave para ver sus cumplimientos
@@ -92,10 +127,10 @@ export default function CompliancePage() {
               {isLoading && (
                 <tr><td colSpan={9} className="table-cell text-center text-slate-400 py-12">Cargando…</td></tr>
               )}
-              {!isLoading && records.length === 0 && (
+              {!isLoading && filteredRecords.length === 0 && (
                 <tr><td colSpan={9} className="table-cell text-center text-slate-400 py-12">No hay registros de cumplimiento para esta aeronave</td></tr>
               )}
-              {records.map((c) => {
+              {filteredRecords.map((c) => {
                 const { label, cls } = dueBadge(c);
                 const isOverdue = cls === 'badge-overdue';
                 return (

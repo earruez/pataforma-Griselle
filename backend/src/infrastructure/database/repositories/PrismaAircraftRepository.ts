@@ -1,7 +1,10 @@
 import { Aircraft, CreateAircraftInput, UpdateAircraftInput, AircraftStatus } from '../../../domain/entities/Aircraft';
-import { IAircraftRepository, MaintenancePlanItem, PlanItemStatus } from '../../../domain/repositories/IAircraftRepository';
+import { IAircraftRepository, MaintenancePlanItem, PlanItemStatus, DueByType } from '../../../domain/repositories/IAircraftRepository';
 import { PaginatedResult, PaginationOptions } from '../../../domain/repositories/shared';
 import { prisma } from '../prisma.client';
+
+const AVG_FLIGHT_HOURS_PER_DAY = 2;
+const MS_PER_DAY = 864e5;
 
 export class PrismaAircraftRepository implements IAircraftRepository {
   async findById(id: string, organizationId: string): Promise<Aircraft | null> {
@@ -79,20 +82,98 @@ export class PrismaAircraftRepository implements IAircraftRepository {
     const compByTask = new Map<string, Record<string, unknown>>();
     for (const c of latestCompliances) compByTask.set(c.taskId as string, c);
 
+    const sentWrItems = await prisma.workRequestItem.findMany({
+      where: {
+        taskId: { in: taskIds },
+        workRequest: {
+          aircraftId,
+          organizationId,
+          status: 'SENT',
+        },
+      },
+      include: {
+        workRequest: {
+          select: { id: true, number: true, sentAt: true },
+        },
+      },
+      orderBy: { workRequest: { sentAt: 'desc' } },
+    });
+
+    const wrByTask = new Map<string, { id: string; number: string }>();
+    for (const item of sentWrItems) {
+      if (item.taskId && !wrByTask.has(item.taskId)) {
+        wrByTask.set(item.taskId, { id: item.workRequest.id, number: item.workRequest.number });
+      }
+    }
+
     return links.map(({ task }) => {
       const comp = compByTask.get(task.id);
+      const complianceNotes = (comp?.notes as string | null) ?? null;
+      const evidenceMatch = complianceNotes?.match(/Evidencia\s([^|]+)/i);
+      const referenceText = `${task.referenceType} ${task.referenceNumber ?? ''}`.toUpperCase();
+      const legalSource: 'FABRICANTE' | 'DGAC' | 'EASA' =
+        referenceText.includes('DGAC') || task.referenceType === 'INTERNAL'
+          ? 'DGAC'
+          : referenceText.includes('EASA') || task.referenceType === 'AD'
+            ? 'EASA'
+            : 'FABRICANTE';
+      const intervalCalendarMonths =
+        ((task as unknown as Record<string, unknown>).intervalCalendarMonths as number | null | undefined) ?? null;
+      const calendarMonths = intervalCalendarMonths ?? 0;
       const nextDueHours  = comp?.nextDueHours  != null ? Number(comp.nextDueHours)  : null;
       const nextDueCycles = comp?.nextDueCycles != null ? Number(comp.nextDueCycles) : null;
       const nextDueDate   = comp?.nextDueDate   != null ? new Date(comp.nextDueDate as string) : null;
 
+      const rawHoursRemaining = nextDueHours != null ? nextDueHours - currentHours : null;
+      const rawDaysRemaining = nextDueDate != null
+        ? (nextDueDate.getTime() - now.getTime()) / MS_PER_DAY
+        : null;
+      const hoursFromCalendar = rawDaysRemaining != null
+        ? rawDaysRemaining * AVG_FLIGHT_HOURS_PER_DAY
+        : null;
+
+      const effectiveHoursRemaining =
+        rawHoursRemaining != null && hoursFromCalendar != null
+          ? Math.min(rawHoursRemaining, hoursFromCalendar)
+          : rawHoursRemaining ?? hoursFromCalendar;
+
+      const dueBy: DueByType | null =
+        rawHoursRemaining != null && hoursFromCalendar != null
+          ? (rawHoursRemaining <= hoursFromCalendar ? 'HOURS' : 'CALENDAR')
+          : rawHoursRemaining != null
+            ? 'HOURS'
+            : rawDaysRemaining != null
+              ? 'CALENDAR'
+              : null;
+
       let status: PlanItemStatus = 'NEVER_PERFORMED';
       if (comp) {
+        const hasHourLimit = task.intervalHours != null && Number(task.intervalHours) > 0;
+        const hasCalendarLimit =
+          (task.intervalCalendarDays != null && task.intervalCalendarDays > 0)
+          || calendarMonths > 0;
+        const isMixed = hasHourLimit && hasCalendarLimit;
+
+        const calendarIntervalDays =
+          task.intervalCalendarDays
+          ?? (calendarMonths > 0 ? calendarMonths * 30 : null);
+
         const overdueH  = nextDueHours  != null && currentHours  > nextDueHours;
         const overdueC  = nextDueCycles != null && currentCycles > nextDueCycles;
         const overdueD  = nextDueDate   != null && nextDueDate   < now;
-        const dueSoonH  = nextDueHours  != null && (nextDueHours  - currentHours)  <= 50;
+
+        const dueSoonH  = nextDueHours  != null && (
+          isMixed && task.intervalHours != null
+            ? (nextDueHours - currentHours) <= Number(task.intervalHours) * 0.1
+            : (nextDueHours - currentHours) <= 50
+        );
         const dueSoonC  = nextDueCycles != null && (nextDueCycles - currentCycles) <= 25;
-        const dueSoonD  = nextDueDate   != null && (nextDueDate.getTime() - now.getTime()) <= 30 * 864e5;
+        const dueSoonD  = nextDueDate   != null && (
+          isMixed && calendarIntervalDays != null
+            ? (nextDueDate.getTime() - now.getTime()) <= calendarIntervalDays * 0.1 * 864e5
+            : (nextDueDate.getTime() - now.getTime()) <= 30 * 864e5
+        );
+
         if (overdueH || overdueC || overdueD)       status = 'OVERDUE';
         else if (dueSoonH || dueSoonC || dueSoonD)  status = 'DUE_SOON';
         else                                         status = 'OK';
@@ -106,6 +187,7 @@ export class PrismaAircraftRepository implements IAircraftRepository {
         intervalHours:       task.intervalHours != null ? Number(task.intervalHours) : null,
         intervalCycles:      task.intervalCycles,
         intervalCalendarDays:task.intervalCalendarDays,
+        intervalCalendarMonths,
         referenceType:       task.referenceType,
         referenceNumber:     task.referenceNumber,
         isMandatory:         task.isMandatory,
@@ -116,10 +198,15 @@ export class PrismaAircraftRepository implements IAircraftRepository {
         nextDueHours,
         nextDueCycles,
         nextDueDate,
-        hoursRemaining:  nextDueHours  != null ? Math.round(nextDueHours  - currentHours)  : null,
+        hoursRemaining:  effectiveHoursRemaining != null ? Math.round(effectiveHoursRemaining) : null,
         cyclesRemaining: nextDueCycles != null ? Math.round(nextDueCycles - currentCycles) : null,
-        daysRemaining:   nextDueDate   != null ? Math.ceil((nextDueDate.getTime() - now.getTime()) / 864e5) : null,
+        daysRemaining:   rawDaysRemaining != null ? Math.ceil(rawDaysRemaining) : null,
+        dueBy,
         status,
+        inWorkRequestId: wrByTask.get(task.id)?.id ?? null,
+        inWorkRequestNumber: wrByTask.get(task.id)?.number ?? null,
+        legalSource,
+        lastEvidenceUrl: evidenceMatch?.[1]?.trim() ?? null,
       };
     }).sort((a, b) => {
       const order = { OVERDUE: 0, DUE_SOON: 1, NEVER_PERFORMED: 2, OK: 3 };
