@@ -10,7 +10,6 @@ import { tasksApi } from '@api/tasks.api';
 import type { TaskDefinition, CreateTaskInput } from '@api/tasks.api';
 import { complianceApi } from '@api/compliance.api';
 import type { RecordComplianceInput } from '@api/compliance.api';
-import { classifyRemaining, type HealthBucket } from '@/shared/maintenancePlanClassifier';
 import { useWorkRequestStore } from '../store/workRequestStore';
 import { isActiveWorkRequestStatus } from '@/shared/workRequestTypes';
 import {
@@ -84,6 +83,7 @@ interface SmartPriority {
   band: PriorityBand;
   driver: PriorityDriver;
   remaining: number | null;
+  remainingPercent: number | null;
   mixedReason: 'horas' | 'fecha' | null;
 }
 
@@ -159,60 +159,122 @@ const RISK_LEVEL_META: Record<RiskLevel, {
   },
 };
 
-function getSmartPriority(item: MaintenancePlanItem): SmartPriority {
+function startOfDay(date: Date): Date {
+  const clone = new Date(date);
+  clone.setHours(0, 0, 0, 0);
+  return clone;
+}
+
+function getDaysRemaining(nextDueDate: string | null, today: Date): number | null {
+  if (!nextDueDate) return null;
+  const due = startOfDay(new Date(nextDueDate));
+  if (Number.isNaN(due.getTime())) return null;
+  const now = startOfDay(today);
+  return Math.round((due.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+}
+
+function getSmartPriority(
+  item: MaintenancePlanItem,
+  context?: { currentHours?: number | null; today?: Date },
+): SmartPriority {
   const maintenanceType = classifyMaintenanceType(item);
+  const today = context?.today ?? new Date();
+  const currentHours = context?.currentHours ?? null;
+
+  const calendarIntervalDays =
+    (item.intervalCalendarDays != null && item.intervalCalendarDays > 0)
+      ? item.intervalCalendarDays
+      : (item.intervalCalendarMonths != null && item.intervalCalendarMonths > 0)
+        ? item.intervalCalendarMonths * 30
+        : null;
+
+  const hoursRemaining =
+    (item.nextDueHours != null && currentHours != null)
+      ? item.nextDueHours - currentHours
+      : item.hoursRemaining ?? null;
+  const daysRemaining = getDaysRemaining(item.nextDueDate, today) ?? item.daysRemaining ?? null;
 
   let driver: PriorityDriver = 'NONE';
   let remaining: number | null = null;
+  let remainingPercent: number | null = null;
   let mixedReason: 'horas' | 'fecha' | null = null;
 
   if (maintenanceType === 'HORARIO') {
     driver = 'HORAS';
-    remaining = item.hoursRemaining ?? null;
+    remaining = hoursRemaining;
+    if (remaining != null && item.intervalHours != null && item.intervalHours > 0) {
+      remainingPercent = remaining / item.intervalHours;
+    }
   } else if (maintenanceType === 'CALENDARIO') {
     driver = 'FECHA';
-    remaining = item.daysRemaining ?? null;
+    remaining = daysRemaining;
+    if (remaining != null && calendarIntervalDays != null && calendarIntervalDays > 0) {
+      remainingPercent = remaining / calendarIntervalDays;
+    }
   } else {
-    const hasHours = item.hoursRemaining != null;
-    const hasDays = item.daysRemaining != null;
+    const hasHours = hoursRemaining != null;
+    const hasDays = daysRemaining != null;
+    const hasHoursInterval = item.intervalHours != null && item.intervalHours > 0;
+    const hasDaysInterval = calendarIntervalDays != null && calendarIntervalDays > 0;
 
-    if (hasHours && hasDays) {
-      if (item.hoursRemaining! <= item.daysRemaining!) {
+    const hoursPercent = hasHours && hasHoursInterval ? hoursRemaining! / item.intervalHours! : null;
+    const daysPercent = hasDays && hasDaysInterval ? daysRemaining! / calendarIntervalDays! : null;
+
+    if (hoursPercent != null && daysPercent != null) {
+      if (hoursPercent <= daysPercent) {
         driver = 'HORAS';
-        remaining = item.hoursRemaining!;
+        remaining = hoursRemaining!;
+        remainingPercent = hoursPercent;
         mixedReason = 'horas';
       } else {
         driver = 'FECHA';
-        remaining = item.daysRemaining!;
+        remaining = daysRemaining!;
+        remainingPercent = daysPercent;
+        mixedReason = 'fecha';
+      }
+    } else if (hoursPercent != null) {
+      driver = 'HORAS';
+      remaining = hoursRemaining!;
+      remainingPercent = hoursPercent;
+      mixedReason = 'horas';
+    } else if (daysPercent != null) {
+      driver = 'FECHA';
+      remaining = daysRemaining!;
+      remainingPercent = daysPercent;
+      mixedReason = 'fecha';
+    } else if (hasHours && hasDays) {
+      if (hoursRemaining! <= daysRemaining!) {
+        driver = 'HORAS';
+        remaining = hoursRemaining!;
+        mixedReason = 'horas';
+      } else {
+        driver = 'FECHA';
+        remaining = daysRemaining!;
         mixedReason = 'fecha';
       }
     } else if (hasHours) {
       driver = 'HORAS';
-      remaining = item.hoursRemaining!;
+      remaining = hoursRemaining!;
       mixedReason = 'horas';
     } else if (hasDays) {
       driver = 'FECHA';
-      remaining = item.daysRemaining!;
+      remaining = daysRemaining!;
       mixedReason = 'fecha';
     }
   }
 
-  const unit = driver === 'HORAS' ? 'FH' : driver === 'FECHA' ? 'DAYS' : null;
-  const computedRisk: HealthBucket =
-    remaining != null && unit
-      ? classifyRemaining(remaining, unit)
-      : item.status === 'OVERDUE'
-        ? 'danger'
-        : item.status === 'DUE_SOON' || item.status === 'NEVER_PERFORMED'
-          ? 'warning'
-          : 'healthy';
-
   const overdue = item.status === 'OVERDUE' || (remaining != null && remaining < 0);
-  const visual: PriorityVisual = overdue || computedRisk === 'danger'
+  const visual: PriorityVisual = overdue
     ? 'critical'
-    : computedRisk === 'warning' || item.status === 'NEVER_PERFORMED'
-      ? 'attention'
-      : 'controlled';
+    : remainingPercent != null
+      ? remainingPercent < 0.10
+        ? 'critical'
+        : remainingPercent <= 0.25
+          ? 'attention'
+          : 'controlled'
+      : item.status === 'DUE_SOON' || item.status === 'NEVER_PERFORMED'
+        ? 'attention'
+        : 'controlled';
 
   const band: PriorityBand = overdue
     ? 'overdue'
@@ -222,7 +284,7 @@ function getSmartPriority(item: MaintenancePlanItem): SmartPriority {
         ? 'next-normal'
         : 'no-urgency';
 
-  return { visual, band, driver, remaining, mixedReason };
+  return { visual, band, driver, remaining, remainingPercent, mixedReason };
 }
 
 const STATUS_META: Record<PlanItemStatus, { label: string; badge: string; icon: typeof AlertTriangle }> = {
@@ -1070,13 +1132,18 @@ export default function MaintenancePlanPage() {
   const resolveInlineSt = (item: MaintenancePlanItem) => inlineStByTaskId[item.taskId];
   const isItemInRequest = (item: MaintenancePlanItem) => Boolean(item.inWorkRequestId || item.inWorkRequestNumber || resolveInlineSt(item));
 
+  const priorityContext = useMemo(
+    () => ({ currentHours: selectedAircraft?.totalFlightHours ?? null, today: new Date() }),
+    [selectedAircraft?.totalFlightHours],
+  );
+
   const smartPriorityByTaskId = useMemo(() => {
     const map = new Map<string, SmartPriority>();
     for (const item of planItems) {
-      map.set(item.taskId, getSmartPriority(item));
+      map.set(item.taskId, getSmartPriority(item, priorityContext));
     }
     return map;
-  }, [planItems]);
+  }, [planItems, priorityContext]);
 
   const filteredPlan = useMemo(() => {
     return planItems
@@ -1098,8 +1165,8 @@ export default function MaintenancePlanPage() {
         return true;
       })
       .sort((a, b) => {
-        const ap = smartPriorityByTaskId.get(a.taskId) ?? getSmartPriority(a);
-        const bp = smartPriorityByTaskId.get(b.taskId) ?? getSmartPriority(b);
+        const ap = smartPriorityByTaskId.get(a.taskId) ?? getSmartPriority(a, priorityContext);
+        const bp = smartPriorityByTaskId.get(b.taskId) ?? getSmartPriority(b, priorityContext);
 
         const bandSort = BAND_ORDER[ap.band] - BAND_ORDER[bp.band];
         if (bandSort !== 0) return bandSort;
@@ -1110,7 +1177,7 @@ export default function MaintenancePlanPage() {
 
         return STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
       });
-  }, [planItems, filterStatus, normativeTab, maintenanceTab, search, smartPriorityByTaskId, onlyPendingAction]);
+  }, [planItems, filterStatus, normativeTab, maintenanceTab, search, smartPriorityByTaskId, onlyPendingAction, priorityContext]);
 
   const normativeCounts = useMemo(() => {
     const dgac = planItems.filter(i => i.referenceType === 'INTERNAL').length;
@@ -1126,17 +1193,17 @@ export default function MaintenancePlanPage() {
 
   const smartSummary = useMemo(() => {
     const criticalItems = filteredPlan.filter((item) => {
-      const priority = smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item);
+      const priority = smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item, priorityContext);
       return priority.visual === 'critical';
     });
 
     const byHours = criticalItems.filter((item) => {
-      const priority = smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item);
+      const priority = smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item, priorityContext);
       return priority.driver === 'HORAS';
     }).length;
 
     const byDate = criticalItems.filter((item) => {
-      const priority = smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item);
+      const priority = smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item, priorityContext);
       return priority.driver === 'FECHA';
     }).length;
 
@@ -1145,7 +1212,7 @@ export default function MaintenancePlanPage() {
       byHours,
       byDate,
     };
-  }, [filteredPlan, smartPriorityByTaskId]);
+  }, [filteredPlan, smartPriorityByTaskId, priorityContext]);
 
   const draftForAircraft = useMemo(() => (
     selectedId ? getDraftWorkRequestByAircraft(selectedId) : null
@@ -1165,7 +1232,7 @@ export default function MaintenancePlanPage() {
     let dueSoonCount = 0;
 
     for (const item of planItems) {
-      const priority = smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item);
+      const priority = smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item, priorityContext);
       const maintenanceType = classifyMaintenanceType(item);
       const inRequest = isItemInRequest(item);
 
@@ -1176,7 +1243,7 @@ export default function MaintenancePlanPage() {
       const mixedCriticalSoon = maintenanceType === 'MIXTO'
         && (
           priority.visual === 'critical'
-          || (priority.visual === 'attention' && priority.remaining != null && priority.remaining <= 10)
+          || priority.visual === 'attention'
         );
       if (mixedCriticalSoon) mixedCriticalCount += 1;
 
@@ -1214,7 +1281,7 @@ export default function MaintenancePlanPage() {
       rawScore,
       mitigation,
     };
-  }, [planItems, smartPriorityByTaskId, inlineStByTaskId]);
+  }, [planItems, smartPriorityByTaskId, inlineStByTaskId, priorityContext]);
 
   const aircraftAlert = useMemo(() => {
     const overdueCount = planItems.filter((item) => item.status === 'OVERDUE').length;
@@ -1222,10 +1289,8 @@ export default function MaintenancePlanPage() {
 
     const mixedCriticalSoonCount = planItems.filter((item) => {
       if (classifyMaintenanceType(item) !== 'MIXTO') return false;
-      const priority = smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item);
-      if (priority.driver === 'HORAS' && priority.remaining != null) return priority.remaining <= 10;
-      if (priority.driver === 'FECHA' && priority.remaining != null) return priority.remaining <= 10;
-      return false;
+      const priority = smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item, priorityContext);
+      return priority.visual === 'critical' || priority.visual === 'attention';
     }).length;
 
     const pendingWithoutSTCount = planItems.filter((item) => (
@@ -1250,7 +1315,7 @@ export default function MaintenancePlanPage() {
       hasAccumulatedDraft,
       draftItemsCount,
     };
-  }, [planItems, smartPriorityByTaskId, draftForAircraft, inlineStByTaskId]);
+  }, [planItems, smartPriorityByTaskId, draftForAircraft, inlineStByTaskId, priorityContext]);
 
   const handleReviewCritical = () => {
     setOnlyPendingAction(true);
@@ -1774,7 +1839,7 @@ export default function MaintenancePlanPage() {
                     <TaskRow
                       key={item.taskId}
                       item={item}
-                      priority={smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item)}
+                      priority={smartPriorityByTaskId.get(item.taskId) ?? getSmartPriority(item, priorityContext)}
                       inlineST={resolveInlineSt(item)}
                       selected={selectedTaskIds.includes(item.taskId)}
                       selectable={!isItemInRequest(item)}
