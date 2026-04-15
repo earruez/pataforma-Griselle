@@ -1,6 +1,6 @@
 import { type ReactNode, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { toast } from 'react-hot-toast';
 import { componentApi, type CreateComponentInput } from '@api/component.api';
 import { aircraftApi } from '@api/aircraft.api';
@@ -69,14 +69,43 @@ function renderMetricPills(
   );
 }
 
-function statusBadge(status: 'critical' | 'warning' | 'ok') {
-  if (status === 'critical') {
-    return <span className="inline-flex rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-700">Crítico</span>;
+type VisibleComponentState = 'Sin registro' | 'Próx. vencer' | 'Vencida' | 'En ST' | 'OT recibida' | 'Al día / Ejecutado';
+type TimelineEventType = 'installation' | 'application' | 'removal' | 'replacement';
+
+interface TimelineEvent {
+  id: string;
+  type: TimelineEventType;
+  occurredAt: string;
+  title: string;
+  details: string[];
+  stRef: string | null;
+  otRef: string | null;
+}
+
+function visibleStateBadge(state: VisibleComponentState) {
+  if (state === 'Vencida') {
+    return <span className="inline-flex rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-700">Vencida</span>;
   }
-  if (status === 'warning') {
-    return <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700">Atención</span>;
+  if (state === 'Próx. vencer') {
+    return <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700">Próx. vencer</span>;
   }
-  return <span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">OK</span>;
+  if (state === 'En ST') {
+    return <span className="inline-flex rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-700">En ST</span>;
+  }
+  if (state === 'OT recibida') {
+    return <span className="inline-flex rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">OT recibida</span>;
+  }
+  if (state === 'Al día / Ejecutado') {
+    return <span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">Al día / Ejecutado</span>;
+  }
+  return <span className="inline-flex rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-semibold text-slate-700">Sin registro</span>;
+}
+
+function timelineStyle(type: TimelineEventType): { dot: string; badge: string; label: string } {
+  if (type === 'installation') return { dot: 'bg-blue-500', badge: 'bg-blue-50 text-blue-700 border-blue-200', label: 'Instalación' };
+  if (type === 'application') return { dot: 'bg-emerald-500', badge: 'bg-emerald-50 text-emerald-700 border-emerald-200', label: 'Aplicación' };
+  if (type === 'removal') return { dot: 'bg-slate-400', badge: 'bg-slate-50 text-slate-700 border-slate-200', label: 'Remoción' };
+  return { dot: 'bg-amber-500', badge: 'bg-amber-50 text-amber-700 border-amber-200', label: 'Reemplazo' };
 }
 
 function NewComponentModal({ onClose }: { onClose: () => void }) {
@@ -295,6 +324,10 @@ function RegisterComponentExecutionModal({
           movementType: 'replacement',
           removedComponentInstanceId: componentId || null,
           installedComponentInstanceId: created.id,
+          removedPartNumber: selectedComponent?.partNumber ?? null,
+          removedSerialNumber: selectedComponent?.serialNumber ?? null,
+          installedPartNumber: newPartNumber.trim(),
+          installedSerialNumber: newSerialNumber.trim(),
           workRequestId: context.workRequestId,
           officeOrderId: context.officeOrderId,
           workOrderNumber: workOrderNumber.trim(),
@@ -455,7 +488,6 @@ function RegisterComponentExecutionModal({
 }
 
 export default function ComponentsPage() {
-  const navigate = useNavigate();
   const qc = useQueryClient();
   const [showModal, setShowModal] = useState(false);
   const [executionDraft, setExecutionDraft] = useState<{
@@ -531,8 +563,16 @@ export default function ComponentsPage() {
     return components.filter((c) => [c.partNumber, c.serialNumber, c.description, c.manufacturer ?? '', c.position ?? ''].join(' ').toLowerCase().includes(q));
   }, [components, componentSearch]);
 
+  const componentById = useMemo(() => {
+    const map = new Map<string, ComponentRow>();
+    for (const c of components as ComponentRow[]) {
+      map.set(c.id, c);
+    }
+    return map;
+  }, [components]);
+
   const installedComponents = useMemo(
-    () => filteredComponents.filter((c) => !removedComponentIds.includes(c.id)),
+    () => filteredComponents.filter((c) => !removedComponentIds.includes(c.id) && !(c.position ?? '').toUpperCase().startsWith('REMOVED')),
     [filteredComponents, removedComponentIds],
   );
 
@@ -546,6 +586,194 @@ export default function ComponentsPage() {
     }
     return map;
   }, [componentApplications]);
+
+  const taskById = useMemo(() => {
+    const map = new Map<string, MaintenancePlanItem>();
+    for (const t of planItems) map.set(t.taskId, t);
+    return map;
+  }, [planItems]);
+
+  const workRequestRefById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const wr of workRequests) map.set(wr.id, wr.folio);
+    return map;
+  }, [workRequests]);
+
+  const buildDueContextForComponent = (c: ComponentRow) => {
+    const latestApplication = latestApplicationByComponentId.get(c.id) ?? null;
+    const traceTask = latestApplication
+      ? taskById.get(latestApplication.taskId) ?? null
+      : null;
+
+    const snapshot: AircraftSnapshot = {
+      currentHours: selectedAircraftData?.totalFlightHours ?? 0,
+      currentCycles: selectedAircraftData?.totalCycles ?? 0,
+      currentDate: new Date().toISOString(),
+    };
+
+    const fallbackAppliedHours = snapshot.currentHours - (c.hoursSinceOverhaul ?? c.totalHoursSinceNew ?? 0);
+    const syntheticApplication: ComponentApplication = latestApplication ?? {
+      id: `synthetic-${c.id}`,
+      componentInstanceId: c.id,
+      taskId: traceTask?.taskId ?? c.id,
+      aircraftId: c.aircraftId ?? selectedAircraft,
+      workRequestId: '',
+      officeOrderId: '',
+      workOrderNumber: '',
+      appliedAt: c.installationDate ?? new Date().toISOString(),
+      aircraftHoursAtApplication: Number.isFinite(fallbackAppliedHours) ? fallbackAppliedHours : 0,
+      aircraftCyclesAtApplication: snapshot.currentCycles,
+      nextDueHours: null,
+      nextDueCycles: null,
+      nextDueDate: null,
+      notes: null,
+      createdAt: new Date().toISOString(),
+    };
+
+    const definition: ComponentDefinition = {
+      id: `def-${c.id}`,
+      ataChapter: traceTask?.taskCode?.split('-')[0] ?? 'N/A',
+      ataCode: traceTask?.taskCode ?? 'N/A',
+      name: traceTask?.taskTitle ?? c.description,
+      description: traceTask?.taskTitle ?? c.description,
+      intervalType: traceTask ? resolveIntervalType(traceTask) : 'hours',
+      intervalHours: traceTask?.intervalHours ?? c.tboHours ?? null,
+      intervalCycles: traceTask?.intervalCycles ?? null,
+      intervalDays: traceTask?.intervalCalendarDays ?? (traceTask?.intervalCalendarMonths != null ? traceTask.intervalCalendarMonths * 30 : null),
+      requiresComponentTracking: true,
+      sourceGroup: 'COMPONENTS_PAGE',
+      reference: traceTask?.referenceNumber ?? null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    return {
+      due: calculateComponentDue(definition, syntheticApplication, snapshot),
+      latestApplication,
+      traceTask,
+    };
+  };
+
+  const selectedTimelineComponent = useMemo(
+    () => (expandedComponentId ? (componentById.get(expandedComponentId) ?? null) : null),
+    [expandedComponentId, componentById],
+  );
+
+  const selectedTimelineDue = useMemo(
+    () => (selectedTimelineComponent ? buildDueContextForComponent(selectedTimelineComponent) : null),
+    [selectedTimelineComponent],
+  );
+
+  const timelineEvents = useMemo(() => {
+    if (!selectedTimelineComponent) return [] as TimelineEvent[];
+    const componentId = selectedTimelineComponent.id;
+    const events: TimelineEvent[] = [];
+
+    if (selectedTimelineComponent.installationDate) {
+      events.push({
+        id: `inst-${componentId}`,
+        type: 'installation',
+        occurredAt: selectedTimelineComponent.installationDate,
+        title: 'Componente instalado',
+        details: [
+          `P/N: ${selectedTimelineComponent.partNumber}`,
+          `S/N: ${selectedTimelineComponent.serialNumber}`,
+          `Posición: ${selectedTimelineComponent.position ?? '—'}`,
+        ],
+        stRef: null,
+        otRef: null,
+      });
+    }
+
+    for (const app of componentApplications.filter((x) => x.componentInstanceId === componentId)) {
+      const task = taskById.get(app.taskId);
+      events.push({
+        id: `app-${app.id}`,
+        type: 'application',
+        occurredAt: app.appliedAt,
+        title: 'Aplicación registrada',
+        details: [
+          `Tarea ATA: ${task?.taskCode ?? app.taskId}`,
+          `Horas/Ciclos: ${app.aircraftHoursAtApplication.toFixed(1)} / ${app.aircraftCyclesAtApplication}`,
+          `Próximo: ${[
+            app.nextDueHours != null ? `${app.nextDueHours.toFixed(0)} FH` : null,
+            app.nextDueCycles != null ? `${app.nextDueCycles} CYC` : null,
+            app.nextDueDate ? new Date(app.nextDueDate).toLocaleDateString('es-MX') : null,
+          ].filter(Boolean).join(' · ') || '—'}`,
+        ],
+        stRef: workRequestRefById.get(app.workRequestId) ?? app.workRequestId,
+        otRef: app.workOrderNumber,
+      });
+    }
+
+    for (const h of componentHistory) {
+      events.push({
+        id: `api-app-${h.id}`,
+        type: 'application',
+        occurredAt: h.performedAt,
+        title: 'Aplicación registrada',
+        details: [
+          `Tarea ATA: ${h.task.code}`,
+          `Horas/Ciclos: ${h.aircraftHoursAtCompliance.toFixed(1)} / ${h.aircraftCyclesAtCompliance}`,
+          `Próximo: ${[
+            h.nextDueHours != null ? `${h.nextDueHours.toFixed(0)} FH` : null,
+            h.nextDueCycles != null ? `${h.nextDueCycles} CYC` : null,
+            h.nextDueDate ? new Date(h.nextDueDate).toLocaleDateString('es-MX') : null,
+          ].filter(Boolean).join(' · ') || '—'}`,
+        ],
+        stRef: null,
+        otRef: h.workOrderNumber,
+      });
+    }
+
+    for (const move of componentMovements) {
+      const touchesComponent = move.installedComponentInstanceId === componentId || move.removedComponentInstanceId === componentId;
+      if (!touchesComponent) continue;
+
+      if (move.movementType === 'replacement') {
+        events.push({
+          id: `repl-${move.id}`,
+          type: 'replacement',
+          occurredAt: move.performedAt,
+          title: 'Reemplazo de componente',
+          details: [
+            `Saliente: ${move.removedPartNumber ?? (move.removedComponentInstanceId ? componentById.get(move.removedComponentInstanceId)?.partNumber ?? '—' : '—')} / ${move.removedSerialNumber ?? (move.removedComponentInstanceId ? componentById.get(move.removedComponentInstanceId)?.serialNumber ?? '—' : '—')}`,
+            `Entrante: ${move.installedPartNumber ?? (move.installedComponentInstanceId ? componentById.get(move.installedComponentInstanceId)?.partNumber ?? '—' : '—')} / ${move.installedSerialNumber ?? (move.installedComponentInstanceId ? componentById.get(move.installedComponentInstanceId)?.serialNumber ?? '—' : '—')}`,
+            `Posición: ${move.position}`,
+            `Horas/Ciclos: ${move.aircraftHoursAtMovement.toFixed(1)} / ${move.aircraftCyclesAtMovement}`,
+          ],
+          stRef: workRequestRefById.get(move.workRequestId) ?? move.workRequestId,
+          otRef: move.workOrderNumber,
+        });
+        continue;
+      }
+
+      if (move.movementType === 'remove' && move.removedComponentInstanceId === componentId) {
+        events.push({
+          id: `rem-${move.id}`,
+          type: 'removal',
+          occurredAt: move.performedAt,
+          title: 'Componente removido',
+          details: [
+            `P/N: ${move.removedPartNumber ?? componentById.get(componentId)?.partNumber ?? '—'}`,
+            `S/N: ${move.removedSerialNumber ?? componentById.get(componentId)?.serialNumber ?? '—'}`,
+            `Posición: ${move.position}`,
+            `Horas/Ciclos: ${move.aircraftHoursAtMovement.toFixed(1)} / ${move.aircraftCyclesAtMovement}`,
+          ],
+          stRef: workRequestRefById.get(move.workRequestId) ?? move.workRequestId,
+          otRef: move.workOrderNumber,
+        });
+      }
+    }
+
+    const unique = new Map<string, TimelineEvent>();
+    for (const ev of events) {
+      const dedupeKey = `${ev.type}-${ev.occurredAt}-${ev.title}-${ev.otRef ?? ''}-${ev.stRef ?? ''}`;
+      if (!unique.has(dedupeKey)) unique.set(dedupeKey, ev);
+    }
+
+    return Array.from(unique.values()).sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime());
+  }, [selectedTimelineComponent, componentApplications, componentMovements, componentHistory, componentById, taskById, workRequestRefById]);
 
   const isValidSTForExecution = (wrStatus: WorkRequestStatus, hasOtEvidence: boolean) => {
     const eligibleStatuses = new Set<WorkRequestStatus>([
@@ -568,7 +796,10 @@ export default function ComponentsPage() {
   };
 
   const componentFlowById = useMemo(() => {
-    const map = new Map<string, { openOrDraftStId: string | null; validStId: string | null }>();
+    const map = new Map<string, {
+      openOrDraftSt: { id: string; ref: string } | null;
+      validSt: { id: string; ref: string } | null;
+    }>();
     for (const wr of workRequests) {
       if (wr.aircraftId !== selectedAircraft) continue;
       const hasOtEvidence = Boolean(wr.otReference && (wr.otReceivedAt || wr.returnedSignedOtUrl || wr.status === WorkRequestStatus.SIGNED_OT_RECEIVED));
@@ -578,9 +809,9 @@ export default function ComponentsPage() {
       if (!isValid && !isOpen) continue;
       for (const item of wr.items) {
         if (item.sourceKind !== 'component_inspection' || !item.sourceId) continue;
-        const existing = map.get(item.sourceId) ?? { openOrDraftStId: null, validStId: null };
-        if (isValid) existing.validStId = existing.validStId ?? wr.id;
-        if (!isValid && isOpen) existing.openOrDraftStId = existing.openOrDraftStId ?? wr.id;
+        const existing = map.get(item.sourceId) ?? { openOrDraftSt: null, validSt: null };
+        if (isValid) existing.validSt = existing.validSt ?? { id: wr.id, ref: wr.folio };
+        if (!isValid && isOpen) existing.openOrDraftSt = existing.openOrDraftSt ?? { id: wr.id, ref: wr.folio };
         map.set(item.sourceId, existing);
       }
     }
@@ -588,19 +819,74 @@ export default function ComponentsPage() {
   }, [workRequests, selectedAircraft]);
 
   const openOrDraftSTByTaskId = useMemo(() => {
-    const map = new Map<string, string>();
+    const map = new Map<string, { id: string; ref: string }>();
     for (const wr of workRequests) {
       if (wr.aircraftId !== selectedAircraft) continue;
       if (!isOpenOrDraftST(wr.status)) continue;
       for (const item of wr.items) {
         if (!item.sourceId) continue;
         if (!map.has(item.sourceId)) {
-          map.set(item.sourceId, wr.id);
+          map.set(item.sourceId, { id: wr.id, ref: wr.folio });
         }
       }
     }
     return map;
   }, [workRequests, selectedAircraft]);
+
+  const getWorkRequestRef = (workRequestId: string) => {
+    const wr = useWorkRequestStore.getState().workRequests.find((x) => x.id === workRequestId);
+    return wr?.folio ?? workRequestId;
+  };
+
+  const handleInlineAddComponentToST = async (component: ComponentRow) => {
+    if (!component.aircraftId) {
+      toast.error('El componente debe estar asociado a una aeronave para agregarlo a ST');
+      return;
+    }
+
+    const stId = await createSTFromSource('component', {
+      aircraftId: component.aircraftId,
+      sourceId: component.id,
+      ataCode: component.partNumber,
+      title: component.description,
+      description: 'Accion requerida',
+      aircraftHoursAtRequest: selectedAircraftData?.totalFlightHours ?? 0,
+      aircraftCyclesAtRequest: selectedAircraftData?.totalCycles ?? 0,
+      priority: 'media',
+    });
+
+    const stRef = getWorkRequestRef(stId);
+    selectWorkRequest(stId, 'general');
+    toast.success(`Ítem agregado a ${stRef}`);
+  };
+
+  const handleInlineAddTaskToST = async (item: MaintenancePlanItem) => {
+    if (!selectedAircraft) {
+      toast.error('Selecciona una aeronave para agregar la tarea a ST');
+      return;
+    }
+
+    const stId = await createSTFromSource('maintenance_plan', {
+      aircraftId: selectedAircraft,
+      sourceId: item.taskId,
+      ataCode: item.taskCode,
+      title: item.taskTitle,
+      description: 'Accion requerida',
+      aircraftHoursAtRequest: selectedAircraftData?.totalFlightHours ?? 0,
+      aircraftCyclesAtRequest: selectedAircraftData?.totalCycles ?? 0,
+      priority: 'media',
+    });
+
+    const stRef = getWorkRequestRef(stId);
+    selectWorkRequest(stId, 'general');
+    toast.success(`Ítem agregado a ${stRef}`);
+  };
+
+  const handleInlineViewST = (stId: string) => {
+    const stRef = getWorkRequestRef(stId);
+    selectWorkRequest(stId, 'general');
+    toast.success(`ST seleccionada: ${stRef}`);
+  };
 
   const replacementIntervalLabel = (item: MaintenancePlanItem) => {
     const parts: string[] = [];
@@ -738,59 +1024,24 @@ export default function ComponentsPage() {
             {isLoading && <tr><td colSpan={13} className="table-cell text-center text-slate-400 py-12">Cargando…</td></tr>}
             {!isLoading && installedComponents.length === 0 && <tr><td colSpan={13} className="table-cell text-center text-slate-400 py-12">No hay componentes instalados actualmente</td></tr>}
             {installedComponents.map((c: ComponentRow) => {
-              const flow = componentFlowById.get(c.id) ?? { openOrDraftStId: null, validStId: null };
+              const flow = componentFlowById.get(c.id) ?? { openOrDraftSt: null, validSt: null };
               const applicationTask = filteredComponentChapterTasks.find((row) => getExecutionContextForTask(row, 'maintenance_application', c.id)) ?? null;
               const replacementTask = filteredComponentChapterTasks.find((row) => getExecutionContextForTask(row, 'component_replacement', c.id)) ?? null;
-              const showExecutionActions = Boolean(flow.validStId);
-
-              const latestApplication = latestApplicationByComponentId.get(c.id) ?? null;
-              const traceTask = latestApplication
-                ? planItems.find((p) => p.taskId === latestApplication.taskId) ?? null
-                : null;
-
-              const snapshot: AircraftSnapshot = {
-                currentHours: selectedAircraftData?.totalFlightHours ?? 0,
-                currentCycles: selectedAircraftData?.totalCycles ?? 0,
-                currentDate: new Date().toISOString(),
-              };
-
-              const fallbackAppliedHours = snapshot.currentHours - (c.hoursSinceOverhaul ?? c.totalHoursSinceNew ?? 0);
-              const syntheticApplication: ComponentApplication = latestApplication ?? {
-                id: `synthetic-${c.id}`,
-                componentInstanceId: c.id,
-                taskId: traceTask?.taskId ?? c.id,
-                aircraftId: c.aircraftId ?? selectedAircraft,
-                workRequestId: '',
-                officeOrderId: '',
-                workOrderNumber: '',
-                appliedAt: c.installationDate ?? new Date().toISOString(),
-                aircraftHoursAtApplication: Number.isFinite(fallbackAppliedHours) ? fallbackAppliedHours : 0,
-                aircraftCyclesAtApplication: snapshot.currentCycles,
-                nextDueHours: null,
-                nextDueCycles: null,
-                nextDueDate: null,
-                notes: null,
-                createdAt: new Date().toISOString(),
-              };
-
-              const definition: ComponentDefinition = {
-                id: `def-${c.id}`,
-                ataChapter: traceTask?.taskCode?.split('-')[0] ?? 'N/A',
-                ataCode: traceTask?.taskCode ?? 'N/A',
-                name: traceTask?.taskTitle ?? c.description,
-                description: traceTask?.taskTitle ?? c.description,
-                intervalType: traceTask ? resolveIntervalType(traceTask) : 'hours',
-                intervalHours: traceTask?.intervalHours ?? c.tboHours ?? null,
-                intervalCycles: traceTask?.intervalCycles ?? null,
-                intervalDays: traceTask?.intervalCalendarDays ?? (traceTask?.intervalCalendarMonths != null ? traceTask.intervalCalendarMonths * 30 : null),
-                requiresComponentTracking: true,
-                sourceGroup: 'COMPONENTS_PAGE',
-                reference: traceTask?.referenceNumber ?? null,
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-              };
-
-              const due = calculateComponentDue(definition, syntheticApplication, snapshot);
+              const showExecutionActions = Boolean(flow.validSt);
+              const { due, latestApplication, traceTask } = buildDueContextForComponent(c);
+              const installedVisibleState: VisibleComponentState = flow.validSt
+                ? 'OT recibida'
+                : flow.openOrDraftSt
+                  ? 'En ST'
+                  : latestApplication
+                    ? 'Al día / Ejecutado'
+                    : traceTask?.status === 'OVERDUE' || due.status === 'critical'
+                      ? 'Vencida'
+                      : traceTask?.status === 'DUE_SOON' || due.status === 'warning'
+                        ? 'Próx. vencer'
+                        : traceTask?.status === 'NEVER_PERFORMED'
+                          ? 'Sin registro'
+                          : 'Al día / Ejecutado';
 
               return (
                 <tr key={c.id} className="hover:bg-slate-50 transition-colors">
@@ -804,9 +1055,9 @@ export default function ComponentsPage() {
                   <td className="table-cell text-xs">{renderMetricPills(due.labels.remaining, due.criticalBy)}</td>
                   <td className="table-cell text-xs">{renderMetricPills(due.labels.nextDue, due.criticalBy)}</td>
                   <td className="table-cell text-xs text-slate-600">{due.labels.dueOn}</td>
-                  <td className="table-cell text-xs">{statusBadge(due.status)} <span className="sr-only">{due.labels.status}</span></td>
+                  <td className="table-cell text-xs">{visibleStateBadge(installedVisibleState)} <span className="sr-only">{due.labels.status}</span></td>
                   <td className="table-cell text-xs text-slate-600">
-                    {flow.validStId ? 'OT recibida/firmada' : flow.openOrDraftStId ? 'Abierta/Borrador' : 'Sin ST'}
+                    {flow.validSt ? `OT recibida/firmada ${flow.validSt.ref}` : flow.openOrDraftSt ? `En borrador ${flow.openOrDraftSt.ref}` : 'Sin ST'}
                   </td>
                   <td className="table-cell text-center">
                     <div className="flex items-center justify-center gap-1.5">
@@ -816,38 +1067,18 @@ export default function ComponentsPage() {
                       >
                         Ver historial
                       </button>
-                      {!showExecutionActions && !flow.openOrDraftStId && (
+                      {!showExecutionActions && !flow.openOrDraftSt && (
                         <button
                           className="btn-primary btn-xs"
-                          onClick={async () => {
-                            if (!c.aircraftId) {
-                              toast.error('El componente debe estar asociado a una aeronave para agregarlo a ST');
-                              return;
-                            }
-                            const stId = await createSTFromSource('component', {
-                              aircraftId: c.aircraftId,
-                              sourceId: c.id,
-                              ataCode: c.partNumber,
-                              title: c.description,
-                              description: 'Accion requerida',
-                              aircraftHoursAtRequest: selectedAircraftData?.totalFlightHours ?? 0,
-                              aircraftCyclesAtRequest: selectedAircraftData?.totalCycles ?? 0,
-                              priority: 'media',
-                            });
-                            selectWorkRequest(stId, 'general');
-                            navigate(`/work-requests?aircraftId=${encodeURIComponent(c.aircraftId)}&stId=${stId}`);
-                          }}
+                          onClick={() => handleInlineAddComponentToST(c)}
                         >
                           Agregar a ST
                         </button>
                       )}
-                      {!showExecutionActions && flow.openOrDraftStId && (
+                      {!showExecutionActions && flow.openOrDraftSt && (
                         <button
                           className="btn-secondary btn-xs"
-                          onClick={() => {
-                            selectWorkRequest(flow.openOrDraftStId!, 'general');
-                            navigate(`/work-requests?aircraftId=${encodeURIComponent(c.aircraftId ?? selectedAircraft)}&stId=${flow.openOrDraftStId}`);
-                          }}
+                          onClick={() => handleInlineViewST(flow.openOrDraftSt!.id)}
                         >
                           Ver ST
                         </button>
@@ -871,25 +1102,104 @@ export default function ComponentsPage() {
         </table>
       </div>
 
-      {expandedComponentId && (
-        <div className="bg-white rounded-xl border border-slate-200 shadow-card overflow-x-auto">
-          <div className="px-5 py-4 border-b border-slate-100">
-            <h2 className="text-sm font-bold text-slate-900">Historial del componente seleccionado</h2>
-          </div>
-          {loadingComponentHistory ? (
-            <div className="px-5 py-10 text-sm text-slate-400">Cargando historial…</div>
-          ) : componentHistory.length === 0 ? (
-            <div className="px-5 py-10 text-sm text-slate-400">Sin registros para este componente.</div>
-          ) : (
-            <div className="p-5 space-y-2">
-              {componentHistory.map((h) => (
-                <div key={h.id} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
-                  <p className="font-mono text-slate-700">{h.task.code} · {h.task.title}</p>
-                  <p className="text-slate-500 mt-1">{new Date(h.performedAt).toLocaleString('es-MX')} · OT {h.workOrderNumber ?? '—'}</p>
-                </div>
-              ))}
+      {expandedComponentId && selectedTimelineComponent && (
+        <div className="fixed inset-0 z-50 bg-black/40 p-4">
+          <div className="mx-auto flex h-full w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
+              <div>
+                <h2 className="text-base font-bold text-slate-900">Timeline de componente</h2>
+                <p className="text-xs text-slate-500 mt-0.5">Historial completo con eventos respaldados por ST/OT</p>
+              </div>
+              <button
+                type="button"
+                className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+                onClick={() => setExpandedComponentId(null)}
+              >
+                <X size={16} />
+              </button>
             </div>
-          )}
+
+            <div className="grid grid-cols-1 gap-6 overflow-y-auto p-6 lg:grid-cols-[340px,1fr]">
+              <aside className="rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+                <h3 className="text-sm font-bold text-slate-900">Componente actual</h3>
+                <div className="mt-3 space-y-2 text-xs text-slate-700">
+                  <p><span className="font-semibold text-slate-500">Descripción:</span> {selectedTimelineComponent.description}</p>
+                  <p><span className="font-semibold text-slate-500">P/N:</span> <span className="font-mono">{selectedTimelineComponent.partNumber}</span></p>
+                  <p><span className="font-semibold text-slate-500">S/N:</span> <span className="font-mono">{selectedTimelineComponent.serialNumber}</span></p>
+                  <p><span className="font-semibold text-slate-500">Posición:</span> {selectedTimelineComponent.position ?? '—'}</p>
+                  <p><span className="font-semibold text-slate-500">ATA:</span> {selectedTimelineDue?.due.labels.ata ?? 'N/A'}</p>
+                </div>
+
+                <div className="mt-4 border-t border-slate-200 pt-4 space-y-2">
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <span className="text-slate-500">Estado</span>
+                    {(() => {
+                      const flow = componentFlowById.get(selectedTimelineComponent.id) ?? { openOrDraftSt: null, validSt: null };
+                      const traceStatus = selectedTimelineDue?.traceTask?.status;
+                      const dueStatus = selectedTimelineDue?.due.status;
+                      const hasLatest = Boolean(selectedTimelineDue?.latestApplication);
+                      const visible: VisibleComponentState = flow.validSt
+                        ? 'OT recibida'
+                        : flow.openOrDraftSt
+                          ? 'En ST'
+                          : hasLatest
+                            ? 'Al día / Ejecutado'
+                            : traceStatus === 'OVERDUE' || dueStatus === 'critical'
+                              ? 'Vencida'
+                              : traceStatus === 'DUE_SOON' || dueStatus === 'warning'
+                                ? 'Próx. vencer'
+                                : traceStatus === 'NEVER_PERFORMED'
+                                  ? 'Sin registro'
+                                  : 'Al día / Ejecutado';
+                      return visibleStateBadge(visible);
+                    })()}
+                  </div>
+                  <div className="flex items-center justify-between gap-2 text-xs"><span className="text-slate-500">Actual</span><div>{renderMetricPills(selectedTimelineDue?.due.labels.actual ?? [], selectedTimelineDue?.due.criticalBy ?? 'none')}</div></div>
+                  <div className="flex items-center justify-between gap-2 text-xs"><span className="text-slate-500">Remanente</span><div>{renderMetricPills(selectedTimelineDue?.due.labels.remaining ?? [], selectedTimelineDue?.due.criticalBy ?? 'none')}</div></div>
+                  <div className="flex items-center justify-between gap-2 text-xs"><span className="text-slate-500">Próximo</span><div>{renderMetricPills(selectedTimelineDue?.due.labels.nextDue ?? [], selectedTimelineDue?.due.criticalBy ?? 'none')}</div></div>
+                </div>
+              </aside>
+
+              <section>
+                <h3 className="text-sm font-bold text-slate-900">Timeline operacional</h3>
+                {loadingComponentHistory ? (
+                  <div className="mt-4 rounded-xl border border-slate-200 bg-white px-4 py-8 text-sm text-slate-400">Cargando timeline…</div>
+                ) : timelineEvents.length === 0 ? (
+                  <div className="mt-4 rounded-xl border border-slate-200 bg-white px-4 py-8 text-sm text-slate-400">Sin eventos registrados para este componente.</div>
+                ) : (
+                  <ol className="mt-4 space-y-4">
+                    {timelineEvents.map((event, index) => {
+                      const style = timelineStyle(event.type);
+                      return (
+                        <li key={event.id} className="relative rounded-xl border border-slate-200 bg-white p-4">
+                          <div className="flex items-start gap-3">
+                            <div className="relative mt-1">
+                              <span className={`block h-2.5 w-2.5 rounded-full ${style.dot}`} />
+                              {index < timelineEvents.length - 1 && <span className="absolute left-1.5 top-3 block h-14 w-px bg-slate-200" />}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${style.badge}`}>{style.label}</span>
+                                <p className="text-sm font-semibold text-slate-900">{event.title}</p>
+                                <span className="text-xs text-slate-500">{new Date(event.occurredAt).toLocaleString('es-MX')}</span>
+                              </div>
+                              <div className="mt-2 grid grid-cols-1 gap-1 text-xs text-slate-600 md:grid-cols-2">
+                                {event.details.map((detail) => <p key={detail}>{detail}</p>)}
+                              </div>
+                              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                {event.stRef && <span className="inline-flex rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-700">ST {event.stRef}</span>}
+                                {event.otRef && <span className="inline-flex rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">OT {event.otRef}</span>}
+                              </div>
+                            </div>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                )}
+              </section>
+            </div>
+          </div>
         </div>
       )}
 
@@ -931,7 +1241,19 @@ export default function ComponentsPage() {
               {filteredComponentChapterTasks.map((item) => {
                 const appContext = getExecutionContextForTask(item, 'maintenance_application');
                 const replacementContext = getExecutionContextForTask(item, 'component_replacement');
-                const openStId = openOrDraftSTByTaskId.get(item.taskId) ?? null;
+                const openSt = openOrDraftSTByTaskId.get(item.taskId) ?? null;
+                const hasExecutedApplication = componentApplications.some((app) => app.taskId === item.taskId && app.aircraftId === selectedAircraft);
+                const taskVisibleState: VisibleComponentState = appContext || replacementContext
+                  ? 'OT recibida'
+                  : openSt
+                    ? 'En ST'
+                    : hasExecutedApplication || item.status === 'OK'
+                      ? 'Al día / Ejecutado'
+                      : item.status === 'OVERDUE'
+                        ? 'Vencida'
+                        : item.status === 'DUE_SOON'
+                          ? 'Próx. vencer'
+                          : 'Sin registro';
 
                 return (
                 <tr key={item.taskId} className="hover:bg-slate-50 transition-colors">
@@ -945,43 +1267,23 @@ export default function ComponentsPage() {
                       item.nextDueDate ? new Date(item.nextDueDate).toLocaleDateString('es-MX') : null,
                     ].filter(Boolean).join(' / ') || '—'}
                   </td>
-                  <td className="table-cell text-xs text-slate-600">{item.status}</td>
+                  <td className="table-cell text-xs">{visibleStateBadge(taskVisibleState)}</td>
                   <td className="table-cell text-xs text-slate-600">{isComponentTaskCode(item.taskCode) ? 'Requiere componente' : 'Aplicación'}</td>
-                  <td className="table-cell text-xs text-slate-600">{appContext || replacementContext ? 'OT recibida/firmada' : openStId ? 'Abierta/Borrador' : 'Sin solicitud'}</td>
+                  <td className="table-cell text-xs text-slate-600">{appContext || replacementContext ? 'OT recibida/firmada' : openSt ? `En borrador ${openSt.ref}` : 'Sin solicitud'}</td>
                   <td className="table-cell text-center">
                     <div className="flex items-center justify-center gap-1.5">
-                      {!appContext && !replacementContext && !openStId && (
+                      {!appContext && !replacementContext && !openSt && (
                         <button
                           className="btn-primary btn-xs"
-                          onClick={async () => {
-                            if (!selectedAircraft) {
-                              toast.error('Selecciona una aeronave para agregar la tarea a ST');
-                              return;
-                            }
-                            const stId = await createSTFromSource('maintenance_plan', {
-                              aircraftId: selectedAircraft,
-                              sourceId: item.taskId,
-                              ataCode: item.taskCode,
-                              title: item.taskTitle,
-                              description: 'Accion requerida',
-                              aircraftHoursAtRequest: selectedAircraftData?.totalFlightHours ?? 0,
-                              aircraftCyclesAtRequest: selectedAircraftData?.totalCycles ?? 0,
-                              priority: 'media',
-                            });
-                            selectWorkRequest(stId, 'general');
-                            navigate(`/work-requests?aircraftId=${encodeURIComponent(selectedAircraft)}&stId=${stId}`);
-                          }}
+                          onClick={() => handleInlineAddTaskToST(item)}
                         >
                           Agregar a ST
                         </button>
                       )}
-                      {!appContext && !replacementContext && openStId && (
+                      {!appContext && !replacementContext && openSt && (
                         <button
                           className="btn-secondary btn-xs"
-                          onClick={() => {
-                            selectWorkRequest(openStId, 'general');
-                            navigate(`/work-requests?aircraftId=${encodeURIComponent(selectedAircraft)}&stId=${openStId}`);
-                          }}
+                          onClick={() => handleInlineViewST(openSt.id)}
                         >
                           Ver ST
                         </button>
@@ -1016,6 +1318,10 @@ export default function ComponentsPage() {
               <th className="table-header">Fecha</th>
               <th className="table-header">Posición</th>
               <th className="table-header">Movimiento</th>
+              <th className="table-header">P/N saliente</th>
+              <th className="table-header">S/N saliente</th>
+              <th className="table-header">P/N entrante</th>
+              <th className="table-header">S/N entrante</th>
               <th className="table-header">Hrs</th>
               <th className="table-header">Ciclos</th>
               <th className="table-header">ST</th>
@@ -1029,6 +1335,10 @@ export default function ComponentsPage() {
                 <td className="table-cell text-xs text-slate-600">{new Date(row.performedAt).toLocaleString('es-MX')}</td>
                 <td className="table-cell text-xs text-slate-700">{row.position}</td>
                 <td className="table-cell text-xs text-slate-700">{row.movementType}</td>
+                <td className="table-cell text-xs text-slate-700 font-mono">{row.removedPartNumber ?? (row.removedComponentInstanceId ? componentById.get(row.removedComponentInstanceId)?.partNumber ?? '—' : '—')}</td>
+                <td className="table-cell text-xs text-slate-700 font-mono">{row.removedSerialNumber ?? (row.removedComponentInstanceId ? componentById.get(row.removedComponentInstanceId)?.serialNumber ?? '—' : '—')}</td>
+                <td className="table-cell text-xs text-slate-700 font-mono">{row.installedPartNumber ?? (row.installedComponentInstanceId ? componentById.get(row.installedComponentInstanceId)?.partNumber ?? '—' : '—')}</td>
+                <td className="table-cell text-xs text-slate-700 font-mono">{row.installedSerialNumber ?? (row.installedComponentInstanceId ? componentById.get(row.installedComponentInstanceId)?.serialNumber ?? '—' : '—')}</td>
                 <td className="table-cell text-xs text-slate-700 tabular-nums">{row.aircraftHoursAtMovement.toFixed(1)}</td>
                 <td className="table-cell text-xs text-slate-700 tabular-nums">{row.aircraftCyclesAtMovement}</td>
                 <td className="table-cell text-xs text-slate-700">{row.workRequestId}</td>

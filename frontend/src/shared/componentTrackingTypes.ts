@@ -48,6 +48,10 @@ export interface ComponentMovement {
   movementType: ComponentMovementType;
   removedComponentInstanceId: string | null;
   installedComponentInstanceId: string | null;
+  removedPartNumber?: string | null;
+  removedSerialNumber?: string | null;
+  installedPartNumber?: string | null;
+  installedSerialNumber?: string | null;
   workRequestId: string;
   officeOrderId: string;
   workOrderNumber: string;
