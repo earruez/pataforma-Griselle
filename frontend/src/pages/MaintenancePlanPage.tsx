@@ -1576,7 +1576,7 @@ export default function MaintenancePlanPage() {
 
   return (
     <>
-    <div className="p-6 lg:p-8 h-full min-h-0 flex flex-col gap-4">
+    <div className="p-6 lg:p-8 min-h-full flex flex-col gap-4">
       <div className="bg-white rounded-2xl border border-slate-200 p-5 lg:p-6 shadow-sm">
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div className="min-w-[320px] flex-1">

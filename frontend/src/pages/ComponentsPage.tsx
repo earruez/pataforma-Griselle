@@ -229,6 +229,10 @@ function resolveIntervalType(task: MaintenancePlanItem): 'hours' | 'cycles' | 'c
   return 'calendar';
 }
 
+function safeUpper(value: string | null | undefined): string {
+  return (value ?? '').toUpperCase().trim();
+}
+
 function RegisterComponentExecutionModal({
   mode,
   context,
@@ -558,6 +562,10 @@ export default function ComponentsPage() {
       const mapped: ComponentApplication[] = [];
       for (const { component, history } of historyByComponent) {
         for (const record of history as ComponentComplianceRecord[]) {
+          const hoursAtApplication = Number(record.aircraftHoursAtCompliance);
+          const cyclesAtApplication = Number(record.aircraftCyclesAtCompliance);
+          const nextDueHours = record.nextDueHours != null ? Number(record.nextDueHours) : null;
+          const nextDueCycles = record.nextDueCycles != null ? Number(record.nextDueCycles) : null;
           mapped.push({
             id: `api-${record.id}`,
             componentInstanceId: component.id,
@@ -567,10 +575,10 @@ export default function ComponentsPage() {
             officeOrderId: '',
             workOrderNumber: record.workOrderNumber ?? '',
             appliedAt: record.performedAt,
-            aircraftHoursAtApplication: record.aircraftHoursAtCompliance,
-            aircraftCyclesAtApplication: record.aircraftCyclesAtCompliance,
-            nextDueHours: record.nextDueHours,
-            nextDueCycles: record.nextDueCycles,
+            aircraftHoursAtApplication: Number.isFinite(hoursAtApplication) ? hoursAtApplication : 0,
+            aircraftCyclesAtApplication: Number.isFinite(cyclesAtApplication) ? cyclesAtApplication : 0,
+            nextDueHours,
+            nextDueCycles,
             nextDueDate: record.nextDueDate,
             notes: record.notes,
             createdAt: record.performedAt,
@@ -610,8 +618,8 @@ export default function ComponentsPage() {
     templates
       .filter((template) =>
         selectedAircraftData
-        && template.manufacturer.toUpperCase() === selectedAircraftData.manufacturer.toUpperCase()
-        && template.model.toUpperCase() === selectedAircraftData.model.toUpperCase(),
+        && safeUpper(template.manufacturer) === safeUpper(selectedAircraftData.manufacturer)
+        && safeUpper(template.model) === safeUpper(selectedAircraftData.model),
       )
       .flatMap((template) => template.tasks ?? [])
       .filter((task) => isComponentChapterTask({ chapter: task.chapter, section: task.section, taskCode: task.code }))
