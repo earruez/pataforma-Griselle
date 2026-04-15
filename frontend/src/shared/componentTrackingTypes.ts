@@ -77,6 +77,12 @@ export interface ComponentApplication {
   createdAt: string;
 }
 
+export interface AircraftSnapshot {
+  currentHours: number;
+  currentCycles: number;
+  currentDate: string;
+}
+
 export type WorkRequestExecutionType =
   | 'maintenance_application'
   | 'component_replacement'

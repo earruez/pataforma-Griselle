@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { type ReactNode, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'react-hot-toast';
@@ -13,9 +13,15 @@ import { componentChapterLabel, isComponentChapterTask, isComponentTaskCode } fr
 import { createSTFromSource } from '@/shared/createSTFromSource';
 import { useWorkRequestStore } from '../store/workRequestStore';
 import { isActiveWorkRequestStatus, WorkRequestStatus } from '@/shared/workRequestTypes';
-import { calculateNextDue } from '@/shared/componentDueCalculator';
+import { calculateComponentDue, calculateNextDue } from '@/shared/componentDueCalculator';
 import { mockComponentApplications, mockComponentMovements } from '@/shared/componentTrackingMocks';
-import type { ComponentApplication, ComponentMovement, WorkRequestExecutionType } from '@/shared/componentTrackingTypes';
+import type {
+  AircraftSnapshot,
+  ComponentApplication,
+  ComponentDefinition,
+  ComponentMovement,
+  WorkRequestExecutionType,
+} from '@/shared/componentTrackingTypes';
 
 interface ComponentRow {
   id: string;
@@ -37,13 +43,40 @@ type ExecutionContext = {
   officeOrderId: string;
 };
 
-function RemainingCell({ tbo, used }: { tbo: number | null; used: number | null }) {
-  if (tbo == null || used == null) return <span className="text-slate-400">—</span>;
-  const rem = tbo - used;
-  if (rem <= 0) return <span className="font-semibold text-rose-600">VENCIDO</span>;
-  const pct = used / tbo;
-  const color = pct >= 0.9 ? 'text-rose-600' : pct >= 0.75 ? 'text-amber-600' : 'text-emerald-700';
-  return <span className={`tabular-nums font-medium ${color}`}>{rem.toFixed(1)}</span>;
+type CriticalBy = 'hours' | 'cycles' | 'calendar' | 'none';
+
+function renderMetricPills(
+  entries: Array<{ key: Exclude<CriticalBy, 'none'>; label: string }>,
+  criticalBy: CriticalBy,
+): ReactNode {
+  if (entries.length === 0) return <span className="text-slate-400">—</span>;
+
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {entries.map((entry) => (
+        <span
+          key={entry.key}
+          className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${
+            criticalBy === entry.key
+              ? 'border-amber-300 bg-amber-50 text-amber-700'
+              : 'border-slate-200 bg-slate-50 text-slate-600'
+          }`}
+        >
+          {entry.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function statusBadge(status: 'critical' | 'warning' | 'ok') {
+  if (status === 'critical') {
+    return <span className="inline-flex rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-700">Crítico</span>;
+  }
+  if (status === 'warning') {
+    return <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700">Atención</span>;
+  }
+  return <span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">OK</span>;
 }
 
 function NewComponentModal({ onClose }: { onClose: () => void }) {
@@ -503,6 +536,17 @@ export default function ComponentsPage() {
     [filteredComponents, removedComponentIds],
   );
 
+  const latestApplicationByComponentId = useMemo(() => {
+    const map = new Map<string, ComponentApplication>();
+    for (const app of componentApplications) {
+      const existing = map.get(app.componentInstanceId);
+      if (!existing || new Date(app.appliedAt).getTime() > new Date(existing.appliedAt).getTime()) {
+        map.set(app.componentInstanceId, app);
+      }
+    }
+    return map;
+  }, [componentApplications]);
+
   const isValidSTForExecution = (wrStatus: WorkRequestStatus, hasOtEvidence: boolean) => {
     const eligibleStatuses = new Set<WorkRequestStatus>([
       WorkRequestStatus.SIGNED_OT_RECEIVED,
@@ -679,30 +723,88 @@ export default function ComponentsPage() {
               <th className="table-header">S/N</th>
               <th className="table-header">Descripción</th>
               <th className="table-header">Posición</th>
-              <th className="table-header text-right">Actual (h)</th>
-              <th className="table-header text-right">Remanente (h)</th>
+              <th className="table-header">ATA</th>
+              <th className="table-header">Límite</th>
+              <th className="table-header">Actual</th>
+              <th className="table-header">Remanente</th>
               <th className="table-header">Próximo cumplimiento</th>
+              <th className="table-header">Vence el</th>
+              <th className="table-header">Estado</th>
               <th className="table-header">ST</th>
               <th className="table-header text-center">Acciones</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {isLoading && <tr><td colSpan={9} className="table-cell text-center text-slate-400 py-12">Cargando…</td></tr>}
-            {!isLoading && installedComponents.length === 0 && <tr><td colSpan={9} className="table-cell text-center text-slate-400 py-12">No hay componentes instalados actualmente</td></tr>}
+            {isLoading && <tr><td colSpan={13} className="table-cell text-center text-slate-400 py-12">Cargando…</td></tr>}
+            {!isLoading && installedComponents.length === 0 && <tr><td colSpan={13} className="table-cell text-center text-slate-400 py-12">No hay componentes instalados actualmente</td></tr>}
             {installedComponents.map((c: ComponentRow) => {
               const flow = componentFlowById.get(c.id) ?? { openOrDraftStId: null, validStId: null };
               const applicationTask = filteredComponentChapterTasks.find((row) => getExecutionContextForTask(row, 'maintenance_application', c.id)) ?? null;
               const replacementTask = filteredComponentChapterTasks.find((row) => getExecutionContextForTask(row, 'component_replacement', c.id)) ?? null;
               const showExecutionActions = Boolean(flow.validStId);
+
+              const latestApplication = latestApplicationByComponentId.get(c.id) ?? null;
+              const traceTask = latestApplication
+                ? planItems.find((p) => p.taskId === latestApplication.taskId) ?? null
+                : null;
+
+              const snapshot: AircraftSnapshot = {
+                currentHours: selectedAircraftData?.totalFlightHours ?? 0,
+                currentCycles: selectedAircraftData?.totalCycles ?? 0,
+                currentDate: new Date().toISOString(),
+              };
+
+              const fallbackAppliedHours = snapshot.currentHours - (c.hoursSinceOverhaul ?? c.totalHoursSinceNew ?? 0);
+              const syntheticApplication: ComponentApplication = latestApplication ?? {
+                id: `synthetic-${c.id}`,
+                componentInstanceId: c.id,
+                taskId: traceTask?.taskId ?? c.id,
+                aircraftId: c.aircraftId ?? selectedAircraft,
+                workRequestId: '',
+                officeOrderId: '',
+                workOrderNumber: '',
+                appliedAt: c.installationDate ?? new Date().toISOString(),
+                aircraftHoursAtApplication: Number.isFinite(fallbackAppliedHours) ? fallbackAppliedHours : 0,
+                aircraftCyclesAtApplication: snapshot.currentCycles,
+                nextDueHours: null,
+                nextDueCycles: null,
+                nextDueDate: null,
+                notes: null,
+                createdAt: new Date().toISOString(),
+              };
+
+              const definition: ComponentDefinition = {
+                id: `def-${c.id}`,
+                ataChapter: traceTask?.taskCode?.split('-')[0] ?? 'N/A',
+                ataCode: traceTask?.taskCode ?? 'N/A',
+                name: traceTask?.taskTitle ?? c.description,
+                description: traceTask?.taskTitle ?? c.description,
+                intervalType: traceTask ? resolveIntervalType(traceTask) : 'hours',
+                intervalHours: traceTask?.intervalHours ?? c.tboHours ?? null,
+                intervalCycles: traceTask?.intervalCycles ?? null,
+                intervalDays: traceTask?.intervalCalendarDays ?? (traceTask?.intervalCalendarMonths != null ? traceTask.intervalCalendarMonths * 30 : null),
+                requiresComponentTracking: true,
+                sourceGroup: 'COMPONENTS_PAGE',
+                reference: traceTask?.referenceNumber ?? null,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+              };
+
+              const due = calculateComponentDue(definition, syntheticApplication, snapshot);
+
               return (
                 <tr key={c.id} className="hover:bg-slate-50 transition-colors">
                   <td className="table-cell font-mono text-xs text-slate-700">{c.partNumber}</td>
                   <td className="table-cell font-mono text-xs text-slate-700">{c.serialNumber}</td>
                   <td className="table-cell text-slate-700">{c.description}</td>
                   <td className="table-cell text-slate-500">{c.position ?? '—'}</td>
-                  <td className="table-cell text-right tabular-nums">{c.hoursSinceOverhaul != null ? Number(c.hoursSinceOverhaul).toFixed(1) : '—'}</td>
-                  <td className="table-cell text-right"><RemainingCell tbo={c.tboHours} used={c.hoursSinceOverhaul ?? c.totalHoursSinceNew} /></td>
-                  <td className="table-cell text-xs text-slate-500">{c.installationDate ? new Date(c.installationDate).toLocaleDateString('es-MX') : '—'}</td>
+                  <td className="table-cell text-xs text-slate-700 font-medium">{due.labels.ata}</td>
+                  <td className="table-cell text-xs">{renderMetricPills(due.labels.limit, due.criticalBy)}</td>
+                  <td className="table-cell text-xs">{renderMetricPills(due.labels.actual, due.criticalBy)}</td>
+                  <td className="table-cell text-xs">{renderMetricPills(due.labels.remaining, due.criticalBy)}</td>
+                  <td className="table-cell text-xs">{renderMetricPills(due.labels.nextDue, due.criticalBy)}</td>
+                  <td className="table-cell text-xs text-slate-600">{due.labels.dueOn}</td>
+                  <td className="table-cell text-xs">{statusBadge(due.status)} <span className="sr-only">{due.labels.status}</span></td>
                   <td className="table-cell text-xs text-slate-600">
                     {flow.validStId ? 'OT recibida/firmada' : flow.openOrDraftStId ? 'Abierta/Borrador' : 'Sin ST'}
                   </td>
